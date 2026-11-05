@@ -66,6 +66,7 @@ func (s State) EffectiveRules() []Rule {
 	var routedPrefixes []netip.Prefix
 	entriesByID := make(map[string][]string, len(routes))
 	for index, route := range routes {
+		var memberPrefixes []netip.Prefix
 		entries := append([]string(nil), route.Domains...)
 		if index == 0 {
 			entries = append(entries, s.SharedDomains.Entries...)
@@ -110,8 +111,9 @@ func (s State) EffectiveRules() []Rule {
 				}
 				entriesByID[route.ID] = append(entriesByID[route.ID], value)
 			}
-			routedPrefixes = append(routedPrefixes, remaining...)
+			memberPrefixes = append(memberPrefixes, remaining...)
 		}
+		routedPrefixes = append(routedPrefixes, memberPrefixes...)
 	}
 	rules := append([]Rule(nil), s.Rules...)
 	for index, rule := range rules {

@@ -523,6 +523,17 @@ func TestSharedDomainsCoverOnlySubdomainsAtLabelBoundaries(t *testing.T) {
 	}
 }
 
+func TestSharedDomainsPreserveOverlappingRangesWithinOneOwner(t *testing.T) {
+	entries := []string{"192.0.2.0/25", "192.0.2.0/24"}
+	state := State{
+		Rules:         []Rule{{ID: "main", Enabled: true}, {ID: "backup", Enabled: true}},
+		SharedDomains: SharedDomainList{Entries: entries, RuleIDs: []string{"main", "backup"}},
+	}
+	if effective := state.EffectiveRules(); !slices.Equal(effective[0].Domains, entries) {
+		t.Fatalf("ranges belonging to one server must not be split: %+v", effective[0])
+	}
+}
+
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 
