@@ -3,6 +3,7 @@ import { applyRules, fetchJSON, refreshSubscription as requestSubscriptionRefres
 import SharedDomainEditor from "../components/SharedDomainEditor.jsx";
 import RoutingOverview from "../components/RoutingOverview.jsx";
 import SectionTabs from "../components/SectionTabs.jsx";
+import ServerPing from "../components/ServerPing.jsx";
 import { parseDomainInput } from "../domainInput.js";
 import { useI18n } from "../i18n.jsx";
 import Icon from "../components/Icon.jsx";
@@ -10,7 +11,7 @@ import InlineNotice from "../components/InlineNotice.jsx";
 import { formatLatencyMs, statusToneClasses } from "../utils.js";
 
 const defaultForm = { name: "", type: "openvpn", source: "", enabled: true };
-const defaultPriorityDraft = { name: "", ruleId: "", enabled: true, targets: [], schedule: [] };
+const defaultPriorityDraft = { name: "", ruleId: "", selectionMode: "latency", enabled: true, targets: [], schedule: [] };
 const DOMAIN_SEARCH_RESULT_LIMIT = 200;
 const ROUTING_ENTRIES_EXAMPLE = "# Example routing entries\n# Lines starting with # are ignored\n# Domains, IPv4 addresses and IPv4 CIDR ranges are supported\n\nyoutube.com\ngooglevideo.com\ndiscord.com\ngateway.discord.gg\n149.154.160.0/20\n91.108.56.0/22\n";
 
@@ -185,6 +186,7 @@ export default function ConnectionsPage() {
   const [status, setStatus] = useState(null);
   const [failoverStatus, setFailoverStatus] = useState(null);
   const [priorityStatus, setPriorityStatus] = useState(null);
+  const [, refreshPingClock] = useState(0);
   const [domainHealthMap, setDomainHealthMap] = useState(() => new Map());
   const [form, setForm] = useState(defaultForm);
   const [showForm, setShowForm] = useState(false);
@@ -276,10 +278,12 @@ export default function ConnectionsPage() {
   }, [refresh]);
 
   useEffect(() => {
-    if (section !== "active") return;
+    if (section === "catalog") return;
     let cancelled = false;
     let pending = false;
     const timer = setInterval(async () => {
+      // Expire displayed measurements even when every status request fails.
+      refreshPingClock(value => value + 1);
       if (pending) return;
       pending = true;
       try {
@@ -1070,7 +1074,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
   const locationNames = useMemo(() => (probeLocations || []).filter((loc) => !loc.endpointError).map((loc) => loc.name), [probeLocations]);
   const sharedPrimary = sharedDomains?.ruleIds?.find(id => providerRules.some(rule => rule.id === id && rule.enabled));
   const implicitPolicy = sharedPrimary && sharedDomains.entries?.length && !policies.some(policy => policy.ruleId === sharedPrimary) ? {
-    id: "shared-domain-list", ruleId: sharedPrimary, name: t("connections.sharedList"), enabled: true, synthetic: true,
+    id: "shared-domain-list", ruleId: sharedPrimary, name: t("connections.sharedList"), selectionMode: priorityStatusMap?.get("shared-domain-list")?.selectionMode || "latency", enabled: true, synthetic: true,
     targets: sharedDomains.ruleIds.map(id => providerRules.find(rule => rule.id === id && rule.enabled)?.selectedLocation).filter(Boolean).map(location => ({ location })), schedule: [],
   } : null;
   const visiblePolicies = implicitPolicy ? [implicitPolicy, ...policies] : policies;
@@ -1093,6 +1097,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
     setDraft({
       name: policy.name || "",
       ruleId: policy.ruleId || "",
+      selectionMode: policy.selectionMode || "priority",
       enabled: policy.enabled !== false,
       targets: (policy.targets || []).map((target) => target.location).filter(Boolean),
       schedule: (policy.schedule || []).map((item) => ({ start: item.start || "", end: item.end || "", location: item.location || "" })),
@@ -1145,6 +1150,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
       name: draft.name.trim(),
       providerId: provider.id,
       ruleId: draft.ruleId,
+      selectionMode: draft.selectionMode,
       enabled: Boolean(draft.enabled),
       targets: draft.targets.map((location) => ({ location })),
       schedule: draft.schedule
@@ -1222,6 +1228,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-headline text-sm font-bold text-on-surface">{policy.ruleId === sharedPrimary ? t("connections.sharedList") : policy.name}</span>
+                    <span className="text-xs text-on-surface-variant">{t(policy.selectionMode === "latency" ? "connections.selectionByPing" : "connections.selectionByOrder")}</span>
                     <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${policy.enabled ? "bg-secondary/10 text-secondary" : "bg-outline-variant/10 text-outline"}`}>
                       {policy.enabled ? t("connections.priorityEnabled") : t("connections.priorityDisabled")}
                     </span>
@@ -1247,6 +1254,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
                         >
                           {index + 1}. {target.location}
                           {targetStatus?.status === "healthy" ? ` · ${t("connections.serverAvailable")}` : targetStatus?.status === "unhealthy" ? ` · ${t("connections.serverUnavailable")}` : ""}
+                          <span className="ml-2"><ServerPing target={targetStatus} t={t} /></span>
                         </span>
                       );
                     })}
@@ -1295,6 +1303,13 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
             </select>
           </FormField>
 
+          <FormField label={t("connections.selectionMode")} hint={t("connections.selectionModeHelp")}>
+            <select value={draft.selectionMode} onChange={event => setDraft(current => ({ ...current, selectionMode: event.target.value }))} className="w-full rounded-lg border border-outline-variant/30 bg-surface-container px-3 py-2 text-sm text-on-surface">
+              <option value="latency">{t("connections.selectionByPing")}</option>
+              <option value="priority">{t("connections.selectionByOrder")}</option>
+            </select>
+          </FormField>
+
           <div>
             <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-outline">{t("connections.priorityTargets")}</p>
             <div className="mb-2 flex gap-2">
@@ -1329,6 +1344,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
                 >
                   <span className="w-6 text-xs font-bold text-outline">{index + 1}</span>
                   <span className="min-w-0 flex-1 truncate text-sm text-on-surface">{location}</span>
+                  <ServerPing target={priorityStatusMap?.get(editingId)?.targets?.find(target => target.location === location)} t={t} />
                   <button type="button" aria-label={t("connections.moveServerUp", { location })} onClick={() => moveTarget(index, index - 1)} disabled={index === 0} className="rounded p-1 text-on-surface-variant hover:text-primary disabled:opacity-30">
                     <Icon name="arrow_drop_up" className="h-4 w-4" />
                   </button>

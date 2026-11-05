@@ -12,6 +12,7 @@ import (
 
 	"xiomi-router-driver/internal/config"
 	"xiomi-router-driver/internal/openvpn"
+	"xiomi-router-driver/internal/probe"
 	"xiomi-router-driver/internal/status"
 	"xiomi-router-driver/internal/subscription"
 )
@@ -75,6 +76,7 @@ func NewSupervisor(
 		priority:    newPriorityRuntime(),
 	}
 	s.probeStandby = s.probeSubscriptionStandby
+	s.priority.measurePings = probe.MeasureLatencies
 	return s
 }
 

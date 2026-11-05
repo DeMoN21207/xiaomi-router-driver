@@ -11,11 +11,12 @@ func sharedDomainRoutingState(state config.State) config.State {
 	state.SharedDomains = config.SharedDomainList{}
 	primary := routes[0]
 	policy := config.PriorityPolicy{
-		ID:         config.SharedDomainPolicyID,
-		RuleID:     primary.ID,
-		Name:       "Shared domain list",
-		ProviderID: primary.ProviderID,
-		Enabled:    true,
+		ID:            config.SharedDomainPolicyID,
+		RuleID:        primary.ID,
+		Name:          "Shared domain list",
+		ProviderID:    primary.ProviderID,
+		Enabled:       true,
+		SelectionMode: config.PrioritySelectionLatency,
 	}
 	for _, route := range routes {
 		policy.Targets = append(policy.Targets, config.PriorityTarget{Location: route.SelectedLocation})

@@ -39,6 +39,8 @@ export function routingOverview(config, statusMap = new Map(), failoverMap = new
         shared: hasShared,
         count: entries.length,
         policyId,
+        selectionMode: scope.policy?.selectionMode || status?.selectionMode || "priority",
+        scheduledLocation: status?.scheduledLocation || "",
         activeLocation: failover ? failover.mode === "direct" ? "" : failover.activeLocation || "" : status?.activeLocation || "",
         configuredLocation: scope.rule?.selectedLocation || "",
         overrideLocation: status?.overrideLocation || "",

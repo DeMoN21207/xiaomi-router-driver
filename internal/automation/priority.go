@@ -8,6 +8,7 @@ import (
 
 	"xiomi-router-driver/internal/config"
 	"xiomi-router-driver/internal/domains"
+	"xiomi-router-driver/internal/probe"
 	"xiomi-router-driver/internal/status"
 )
 
@@ -32,10 +33,12 @@ type priorityDecision struct {
 }
 
 type priorityRuntime struct {
-	decisions map[string]priorityDecision
-	overrides map[string]priorityOverride
-	health    map[string]providerHealthState
-	lastApply time.Time
+	decisions    map[string]priorityDecision
+	overrides    map[string]priorityOverride
+	health       map[string]providerHealthState
+	pings        map[string]priorityServerPing
+	measurePings func(context.Context, []probe.Location) []probe.Location
+	lastApply    time.Time
 }
 
 func newPriorityRuntime() priorityRuntime {
@@ -43,6 +46,7 @@ func newPriorityRuntime() priorityRuntime {
 		decisions: make(map[string]priorityDecision),
 		overrides: make(map[string]priorityOverride),
 		health:    make(map[string]providerHealthState),
+		pings:     make(map[string]priorityServerPing),
 	}
 }
 
@@ -55,6 +59,9 @@ func (p *priorityRuntime) ensure() {
 	}
 	if p.health == nil {
 		p.health = make(map[string]providerHealthState)
+	}
+	if p.pings == nil {
+		p.pings = make(map[string]priorityServerPing)
 	}
 }
 
@@ -69,6 +76,8 @@ type PriorityPolicyStatus struct {
 	ProviderID        string                 `json:"providerId"`
 	ProviderName      string                 `json:"providerName"`
 	Enabled           bool                   `json:"enabled"`
+	SelectionMode     string                 `json:"selectionMode"`
+	ScheduledLocation string                 `json:"scheduledLocation,omitempty"`
 	ActiveLocation    string                 `json:"activeLocation,omitempty"`
 	PreferredLocation string                 `json:"preferredLocation,omitempty"`
 	OverrideLocation  string                 `json:"overrideLocation,omitempty"`
@@ -90,6 +99,9 @@ type PriorityTargetStatus struct {
 	LastError            string `json:"lastError,omitempty"`
 	Detail               string `json:"detail,omitempty"`
 	LatencyMs            int64  `json:"latencyMs,omitempty"`
+	PingMs               int64  `json:"pingMs,omitempty"`
+	PingError            string `json:"pingError,omitempty"`
+	PingCheckedAt        string `json:"pingCheckedAt,omitempty"`
 	Active               bool   `json:"active"`
 	Preferred            bool   `json:"preferred"`
 }
@@ -166,6 +178,10 @@ func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state conf
 	s.prunePriorityRuntimeLocked(state, now)
 	s.priorityMu.Unlock()
 
+	s.refreshPriorityServerPings(ctx, state, now)
+	if ctx.Err() != nil {
+		return false
+	}
 	next := make(map[string]priorityDecision)
 	for _, policy := range state.PriorityPolicies {
 		decision, ok := s.evaluatePriorityPolicyLocked(ctx, state, snapshot, policy, now)
@@ -376,7 +392,21 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 	s.priorityMu.RLock()
 	override, hasOverride := s.priority.overrides[policy.ID]
 	previous := s.priority.decisions[policy.ID]
+	pings := make(map[string]priorityServerPing, len(policy.Targets))
+	for _, target := range policy.Targets {
+		key := standbyProbeKey(provider, target.Location)
+		pings[key] = s.priority.pings[key]
+	}
 	s.priorityMu.RUnlock()
+	latencyMode := config.NormalizePrioritySelectionMode(policy.SelectionMode) == config.PrioritySelectionLatency
+	chooseByPing := latencyMode && !hasOverride && activePriorityScheduleLocation(policy, now) == ""
+	candidatePolicy := policy
+	if latencyMode {
+		candidatePolicy.Targets = priorityTargetsByPing(policy, provider, pings, now)
+	}
+	if chooseByPing {
+		preferred = candidatePolicy.Targets[0].Location
+	}
 	if policy.RuleID != "" && !locationInPriorityTargets(policy, previous.ActiveLocation) {
 		previous = priorityDecision{}
 	}
@@ -403,7 +433,7 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 			}
 		}
 	}
-	candidates := priorityCandidateLocations(policy, preferred)
+	candidates := priorityCandidateLocations(candidatePolicy, preferred)
 	failureThreshold := time.Duration(state.Automation.FailoverFailureSeconds) * time.Second
 	if failureThreshold <= 0 {
 		failureThreshold = 2 * time.Minute
@@ -440,7 +470,7 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 	for _, location := range candidates {
 		// Keep a working backup instead of hopping through intermediate targets.
 		// Only the preferred target earns automatic restoration after its grace period.
-		if activeProtected && location != preferred && location != previous.ActiveLocation {
+		if !chooseByPing && activeProtected && location != preferred && location != previous.ActiveLocation {
 			continue
 		}
 		probe, checked := probes[location]
@@ -459,10 +489,22 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 			}
 			continue
 		}
+		if chooseByPing && activeProtected && location != previous.ActiveLocation {
+			stableFor := max(time.Minute, time.Duration(state.Automation.FailoverRestoreSeconds)*time.Second)
+			currentPing := pings[standbyProbeKey(provider, previous.ActiveLocation)]
+			candidatePing := pings[standbyProbeKey(provider, location)]
+			if !probes[previous.ActiveLocation].Healthy || !significantPingImprovement(currentPing, candidatePing, now) ||
+				health.HealthySince.IsZero() || now.Sub(health.HealthySince) < stableFor || now.Sub(previous.Since) < stableFor || health.ConsecutiveSuccesses < failoverRestoreStreak() {
+				selected = previous.ActiveLocation
+				selectedProbe = probes[previous.ActiveLocation]
+				reason = "keeping active VPN until a lower server ping is a stable improvement"
+				break
+			}
+		}
 		// Restoration hysteresis protects a working fallback from flapping. It
 		// must not delay an explicit healthy selection or prolong an outage once
 		// the active fallback has exhausted its failure grace period.
-		if location == preferred && activeProtected && !hasOverride && previous.ActiveLocation != "" && previous.ActiveLocation != preferred {
+		if !chooseByPing && location == preferred && activeProtected && !hasOverride && previous.ActiveLocation != "" && previous.ActiveLocation != preferred {
 			threshold := time.Duration(state.Automation.FailoverRestoreSeconds) * time.Second
 			if threshold <= 0 {
 				threshold = 60 * time.Second
@@ -477,6 +519,9 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 			reason = "preferred target is healthy"
 		} else {
 			reason = fmt.Sprintf("preferred target %s is unavailable; using fallback", preferred)
+		}
+		if chooseByPing {
+			reason = "healthy target selected by recent server ping"
 		}
 		break
 	}
@@ -494,6 +539,9 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 			delete(s.priority.overrides, policy.ID)
 		}
 		s.priorityMu.Unlock()
+	}
+	if chooseByPing {
+		preferred = selected
 	}
 
 	return priorityDecision{
@@ -698,6 +746,15 @@ func priorityCandidateLocations(policy config.PriorityPolicy, preferred string) 
 		}
 	}
 	out := make([]string, 0, len(locations))
+	if config.NormalizePrioritySelectionMode(policy.SelectionMode) == config.PrioritySelectionLatency {
+		out = append(out, locations[start])
+		for index, location := range locations {
+			if index != start {
+				out = append(out, location)
+			}
+		}
+		return out
+	}
 	for offset := 0; offset < len(locations); offset++ {
 		out = append(out, locations[(start+offset)%len(locations)])
 	}
@@ -735,6 +792,8 @@ func priorityPolicyFingerprint(policy config.PriorityPolicy, state config.State)
 	b.WriteString(policy.ProviderID)
 	b.WriteString("\n")
 	b.WriteString(policy.RuleID)
+	b.WriteString("\n")
+	b.WriteString(config.NormalizePrioritySelectionMode(policy.SelectionMode))
 	b.WriteString("\n")
 	for _, entry := range priorityPolicyEntries(state, policy) {
 		b.WriteString(entry)
@@ -852,6 +911,8 @@ func (s *Supervisor) PriorityStatus() PriorityStatus {
 			ProviderID:        policy.ProviderID,
 			ProviderName:      provider.Name,
 			Enabled:           policy.Enabled,
+			SelectionMode:     config.NormalizePrioritySelectionMode(policy.SelectionMode),
+			ScheduledLocation: activePriorityScheduleLocation(policy, time.Now()),
 			ActiveLocation:    decision.ActiveLocation,
 			PreferredLocation: decision.PreferredLocation,
 			OverrideLocation:  override.Location,
@@ -863,6 +924,7 @@ func (s *Supervisor) PriorityStatus() PriorityStatus {
 		for _, target := range policy.Targets {
 			location := strings.TrimSpace(target.Location)
 			health := s.priority.health[priorityHealthKey(policy.ID, location)]
+			ping := s.priority.pings[standbyProbeKey(provider, location)]
 			item.Targets = append(item.Targets, PriorityTargetStatus{
 				Location:             location,
 				Status:               firstNonEmpty(health.Status, "unknown"),
@@ -875,6 +937,9 @@ func (s *Supervisor) PriorityStatus() PriorityStatus {
 				LastError:            health.LastError,
 				Detail:               health.Detail,
 				LatencyMs:            health.LatencyMs,
+				PingMs:               ping.Ms,
+				PingError:            ping.Error,
+				PingCheckedAt:        timeString(ping.Checked),
 				Active:               strings.EqualFold(location, decision.ActiveLocation),
 				Preferred:            strings.EqualFold(location, decision.PreferredLocation),
 			})

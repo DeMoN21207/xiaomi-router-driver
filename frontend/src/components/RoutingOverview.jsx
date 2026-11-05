@@ -2,6 +2,8 @@ import { useState } from "react";
 import { fetchJSON } from "../api.js";
 import { routingOverview, serverSwitchRequest } from "../routingOverview.js";
 import Icon from "./Icon.jsx";
+import ServerPing from "./ServerPing.jsx";
+import { formatPriorityPing } from "../priorityPing.js";
 
 export default function RoutingOverview({ config, statusMap, failoverMap, busy, onChanged, onConfigure, showToast, setPageError, t }) {
   const rows = routingOverview(config, statusMap, failoverMap);
@@ -59,9 +61,10 @@ export default function RoutingOverview({ config, statusMap, failoverMap, busy, 
                 <div className="min-w-0">
                   <div className="mb-1 flex items-center gap-2 text-xs text-on-surface-variant">
                     <span className={`h-1.5 w-1.5 rounded-full ${row.activeLocation ? "bg-secondary" : "bg-outline"}`} />
-                    {t(row.unavailable ? "connections.noVpnServer" : row.failover ? "connections.failoverRouteActive" : row.policyId ? row.overrideLocation ? "connections.manualServer" : "connections.autoServer" : "connections.fixedServer")}
+                    {t(row.unavailable ? "connections.noVpnServer" : row.failover ? "connections.failoverRouteActive" : row.policyId ? row.overrideLocation ? "connections.manualServer" : row.scheduledLocation ? "connections.scheduledServer" : row.selectionMode === "latency" ? "connections.autoServerByPing" : "connections.autoServer" : "connections.fixedServer")}
                   </div>
                   <p className="break-words text-sm font-medium text-on-surface">{row.unavailable ? t("connections.noVpnServer") : row.activeLocation || row.configuredLocation || t("connections.waitingServer")}</p>
+                  <p className="mt-1 text-xs text-on-surface-variant">{t("connections.serverPing")}: <ServerPing target={!row.failover && row.targetStatuses.find(target => target.location === (row.activeLocation || row.configuredLocation))} t={t} /></p>
                   {row.policyId && !row.activeLocation && <p className="mt-1 text-xs text-on-surface-variant">{t("connections.waitingServer")}</p>}
                 </div>
                 <div className="flex flex-wrap items-center gap-2 lg:justify-end">
@@ -77,7 +80,7 @@ export default function RoutingOverview({ config, statusMap, failoverMap, busy, 
                 <label className="block text-sm font-medium text-on-surface" htmlFor={`server-choice-${row.id}`}>{t("connections.chooseServerFor", { name })}</label>
                 <select id={`server-choice-${row.id}`} value={location} onChange={event => setLocation(event.target.value)} disabled={saving} className="mt-2 w-full min-w-0 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 py-2 text-sm text-on-surface">
                   <option value="" disabled>{t("connections.prioritySelectTarget")}</option>
-                  {row.targets.map(target => <option key={target} value={target}>{target}</option>)}
+                  {row.targets.map(target => <option key={target} value={target}>{target} · {formatPriorityPing(row.targetStatuses.find(item => item.location === target), t)}</option>)}
                 </select>
                 <p className="mt-2 text-xs text-on-surface-variant">{t(row.policyId ? "connections.manualServerHelp" : "connections.fixedServerHelp")}</p>
                 <div className="mt-4 flex gap-2">

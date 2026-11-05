@@ -38,14 +38,15 @@ type Rule struct {
 }
 
 type PriorityPolicy struct {
-	ID         string                   `json:"id"`
-	RuleID     string                   `json:"ruleId,omitempty"`
-	ProviderID string                   `json:"providerId"`
-	Name       string                   `json:"name"`
-	Enabled    bool                     `json:"enabled"`
-	Entries    []string                 `json:"entries"`
-	Targets    []PriorityTarget         `json:"targets"`
-	Schedule   []PriorityScheduleWindow `json:"schedule"`
+	ID            string                   `json:"id"`
+	RuleID        string                   `json:"ruleId,omitempty"`
+	ProviderID    string                   `json:"providerId"`
+	Name          string                   `json:"name"`
+	Enabled       bool                     `json:"enabled"`
+	SelectionMode string                   `json:"selectionMode,omitempty"`
+	Entries       []string                 `json:"entries"`
+	Targets       []PriorityTarget         `json:"targets"`
+	Schedule      []PriorityScheduleWindow `json:"schedule"`
 }
 
 type PriorityTarget struct {
@@ -516,6 +517,7 @@ func ensureStateSchema(db *sql.DB) error {
 			rule_id TEXT NOT NULL DEFAULT '',
 			name TEXT NOT NULL,
 			enabled INTEGER NOT NULL,
+			selection_mode TEXT NOT NULL DEFAULT 'priority',
 			position INTEGER NOT NULL,
 			FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
 		)`,
@@ -588,6 +590,7 @@ func ensureStateSchema(db *sql.DB) error {
 
 	// Add columns if missing (existing databases).
 	_, _ = db.Exec(`ALTER TABLE priority_policies ADD COLUMN rule_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE priority_policies ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'priority'`)
 	_, _ = db.Exec(`ALTER TABLE routing_settings ADD COLUMN mss_clamp INTEGER NOT NULL DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE routing_settings ADD COLUMN mss_value INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE routing_settings ADD COLUMN dns_hijack INTEGER NOT NULL DEFAULT 1`)
@@ -713,9 +716,9 @@ func saveStateTx(tx *sql.Tx, state State) error {
 
 	for policyIndex, policy := range state.PriorityPolicies {
 		if _, err := tx.Exec(`
-			INSERT INTO priority_policies (id, provider_id, rule_id, name, enabled, position)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, policy.ID, policy.ProviderID, policy.RuleID, policy.Name, boolToInt(policy.Enabled), policyIndex); err != nil {
+			INSERT INTO priority_policies (id, provider_id, rule_id, name, enabled, selection_mode, position)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, policy.ID, policy.ProviderID, policy.RuleID, policy.Name, boolToInt(policy.Enabled), policy.SelectionMode, policyIndex); err != nil {
 			return err
 		}
 		if err := replacePriorityPolicyEntriesTx(tx, policy.ID, policy.Entries); err != nil {
@@ -934,7 +937,7 @@ func (m *Manager) loadUnlocked() (State, error) {
 	}
 
 	policyRows, err := m.db.Query(`
-		SELECT id, provider_id, rule_id, name, enabled
+		SELECT id, provider_id, rule_id, name, enabled, selection_mode
 		FROM priority_policies
 		ORDER BY position ASC, rowid ASC
 	`)
@@ -946,7 +949,7 @@ func (m *Manager) loadUnlocked() (State, error) {
 	for policyRows.Next() {
 		var policy PriorityPolicy
 		var enabled int
-		if err := policyRows.Scan(&policy.ID, &policy.ProviderID, &policy.RuleID, &policy.Name, &enabled); err != nil {
+		if err := policyRows.Scan(&policy.ID, &policy.ProviderID, &policy.RuleID, &policy.Name, &enabled, &policy.SelectionMode); err != nil {
 			return State{}, err
 		}
 		policy.Enabled = intToBool(enabled)
@@ -1236,6 +1239,10 @@ func normalizePriorityPolicies(policies []PriorityPolicy) []PriorityPolicy {
 		policy.ProviderID = strings.TrimSpace(policy.ProviderID)
 		policy.RuleID = strings.TrimSpace(policy.RuleID)
 		policy.Name = strings.TrimSpace(policy.Name)
+		policy.SelectionMode = strings.TrimSpace(policy.SelectionMode)
+		if policy.SelectionMode != "" {
+			policy.SelectionMode = NormalizePrioritySelectionMode(policy.SelectionMode)
+		}
 		policy.Entries = normalizeDomains(policy.Entries)
 		policy.Targets = normalizePriorityTargets(policy.Targets)
 		policy.Schedule = normalizePrioritySchedule(policy.Schedule)

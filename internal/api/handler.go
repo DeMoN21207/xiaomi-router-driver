@@ -93,13 +93,14 @@ type ruleRequest struct {
 }
 
 type priorityPolicyRequest struct {
-	Name       string                          `json:"name"`
-	ProviderID string                          `json:"providerId"`
-	RuleID     *string                         `json:"ruleId"`
-	Enabled    bool                            `json:"enabled"`
-	Entries    []string                        `json:"entries"`
-	Targets    []config.PriorityTarget         `json:"targets"`
-	Schedule   []config.PriorityScheduleWindow `json:"schedule"`
+	Name          string                          `json:"name"`
+	ProviderID    string                          `json:"providerId"`
+	RuleID        *string                         `json:"ruleId"`
+	SelectionMode *string                         `json:"selectionMode"`
+	Enabled       bool                            `json:"enabled"`
+	Entries       []string                        `json:"entries"`
+	Targets       []config.PriorityTarget         `json:"targets"`
+	Schedule      []config.PriorityScheduleWindow `json:"schedule"`
 }
 
 type priorityOverrideRequest struct {
@@ -2128,6 +2129,16 @@ func (h *Handler) buildPriorityPolicy(ctx context.Context, id string, req priori
 			return config.PriorityPolicy{}, errors.New("priority policy route must belong to the selected provider")
 		}
 	}
+	selectionMode := config.PrioritySelectionOrder
+	if req.SelectionMode != nil {
+		value := strings.ToLower(strings.TrimSpace(*req.SelectionMode))
+		if value != "" && value != config.PrioritySelectionOrder && value != config.PrioritySelectionLatency {
+			return config.PriorityPolicy{}, errors.New("selectionMode must be priority or latency")
+		}
+		selectionMode = config.NormalizePrioritySelectionMode(value)
+	} else if previous, exists := findPriorityPolicy(state.PriorityPolicies, id); exists {
+		selectionMode = config.NormalizePrioritySelectionMode(previous.SelectionMode)
+	}
 
 	targets := normalizePriorityRequestTargets(req.Targets)
 	if len(targets) == 0 {
@@ -2148,14 +2159,15 @@ func (h *Handler) buildPriorityPolicy(ctx context.Context, id string, req priori
 		id = newID("policy")
 	}
 	return config.PriorityPolicy{
-		ID:         id,
-		ProviderID: providerID,
-		RuleID:     ruleID,
-		Name:       name,
-		Enabled:    req.Enabled,
-		Entries:    nil,
-		Targets:    targets,
-		Schedule:   schedule,
+		ID:            id,
+		ProviderID:    providerID,
+		RuleID:        ruleID,
+		Name:          name,
+		Enabled:       req.Enabled,
+		SelectionMode: selectionMode,
+		Entries:       nil,
+		Targets:       targets,
+		Schedule:      schedule,
 	}, nil
 }
 
