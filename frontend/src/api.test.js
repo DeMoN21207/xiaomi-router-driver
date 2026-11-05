@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { applyRules } from "./api.js";
+import { applyRules, subscribeLoading, refreshSubscription } from "./api.js";
 
 test("applyRules waits for the background operation", async () => {
   const requests = [];
@@ -85,4 +85,31 @@ test("refreshSubscription allows the full subscription refresh window", async ()
 		globalThis.fetch = originalFetch;
 		globalThis.setTimeout = originalSetTimeout;
 	}
+});
+
+test("the operation loader stays active until background route application really finishes",async()=>{
+ const originalFetch=globalThis.fetch,states=[];let release;
+ const unsubscribe=subscribeLoading((count,operations)=>states.push({count,operations}));
+ globalThis.fetch=async url=>({ok:true,json:()=>url==="/api/rules/apply"?Promise.resolve({operation:{id:"apply_long",status:"queued"}}):new Promise(resolve=>{release=()=>resolve({operation:{status:"succeeded",result:{status:"applied"}}});})});
+ const pending=applyRules({pollIntervalMs:0});
+ try {
+  for(let i=0;i<12&&!release;i++)await Promise.resolve();
+  assert.equal(typeof release,"function");
+  assert.equal(states.at(-1).count,1,"the queued response must not hide the loader");
+  assert.equal(states.at(-1).operations?.[0]?.labelKey,"loading.applyingRoutes");
+  release();await pending;assert.equal(states.at(-1).count,0);
+ }finally{release?.();await pending.catch(()=>{});unsubscribe();globalThis.fetch=originalFetch;}
+});
+
+test("subscription refresh reports its user-facing operation without leaking loader options to fetch",async()=>{
+ const originalFetch=globalThis.fetch,states=[];let release,options;
+ const unsubscribe=subscribeLoading((count,operations)=>states.push({count,operations}));
+ globalThis.fetch=async(_url,value)=>{options=value;return{ok:true,json:()=>new Promise(resolve=>{release=()=>resolve({status:"refreshed"});})};};
+ const pending=refreshSubscription("provider_1");
+ try{
+  for(let i=0;i<8&&!release;i++)await Promise.resolve();
+  assert.equal(states.at(-1).operations?.[0]?.labelKey,"loading.subscriptionRefresh");
+  assert.equal(options.loadingLabelKey,undefined);
+  release();await pending;assert.equal(states.at(-1).count,0);
+ }finally{release?.();await pending.catch(()=>{});unsubscribe();globalThis.fetch=originalFetch;}
 });

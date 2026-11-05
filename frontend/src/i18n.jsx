@@ -1657,6 +1657,35 @@ Object.assign(translations.en, {
   "error.update": "Update error",
 });
 
+Object.assign(translations.ru, {
+  "loading.processing": "Выполняем действие",
+  "loading.subscriptionRefresh": "Обновляем подписку",
+  "loading.applyingRoutes": "Применяем маршруты",
+  "loading.catalogue": "Загружаем серверы",
+  "loading.measuringPing": "Измеряем пинг",
+  "loading.paused": "Обновление приостановлено",
+  "loading.refreshCountdown": "Обновление пинга через {seconds} с",
+  "loading.retryCountdown": "Повтор замера через {seconds} с",
+  "loading.visibleOnly": "Пока открыт этот раздел",
+  "loading.lastUpdate": "замер",
+  "loading.elapsed": "Прошло",
+  "loading.additional": "Ещё операций: {count}",
+});
+Object.assign(translations.en, {
+  "loading.processing": "Processing your action",
+  "loading.subscriptionRefresh": "Refreshing subscription",
+  "loading.applyingRoutes": "Applying routes",
+  "loading.catalogue": "Loading servers",
+  "loading.measuringPing": "Measuring ping",
+  "loading.paused": "Refresh paused",
+  "loading.refreshCountdown": "Ping refresh in {seconds}s",
+  "loading.retryCountdown": "Retrying ping in {seconds}s",
+  "loading.visibleOnly": "While this section is open",
+  "loading.lastUpdate": "measured",
+  "loading.elapsed": "Elapsed",
+  "loading.additional": "More operations: {count}",
+});
+
 export const languages = [
   { code: "ru", label: "Русский" },
   { code: "en", label: "English" },

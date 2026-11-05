@@ -4,6 +4,7 @@ import SharedDomainEditor from "../components/SharedDomainEditor.jsx";
 import RoutingOverview from "../components/RoutingOverview.jsx";
 import SectionTabs from "../components/SectionTabs.jsx";
 import ServerPing from "../components/ServerPing.jsx";
+import RefreshCountdown from "../components/RefreshCountdown.jsx";
 import { startVisiblePolling } from "../visiblePolling.js";
 import { parseDomainInput } from "../domainInput.js";
 import { useI18n } from "../i18n.jsx";
@@ -720,6 +721,7 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
   const [livePings, setLivePings] = useState({});
   const [livePingCheckedAt, setLivePingCheckedAt] = useState("");
   const [livePingFailed, setLivePingFailed] = useState(false);
+  const [livePollState, setLivePollState] = useState({ phase: "paused", nextRunAt: null, intervalMs: 10_000 });
 
   const sharedPrimary = sharedDomains?.ruleIds?.find(id => providerRules.some(rule => rule.id === id && rule.enabled));
   const implicitTargets = sharedPrimary && sharedDomains.entries?.length && !priorityPolicies.some(policy => policy.ruleId === sharedPrimary)
@@ -735,6 +737,7 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
     setLivePings({});
     setLivePingCheckedAt("");
     setLivePingFailed(false);
+    setLivePollState({ phase: "paused", nextRunAt: null, intervalMs: 10_000 });
     if (mode === "catalog") return;
     const locations = JSON.parse(liveLocationsKey);
     if (!locations.length) return;
@@ -753,7 +756,7 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
       } catch {
         if (!signal.aborted) setLivePingFailed(true);
       }
-    });
+    }, { onState: setLivePollState });
   }, [mode, liveLocationsKey, provider.source, provider.type]);
 
   const activeRuleId = providerRules.some(rule => rule.id === selectedRuleId) ? selectedRuleId : providerRules[0]?.id;
@@ -889,7 +892,7 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
       </div>}
 
       <div className="border-t border-outline-variant/20 p-4 sm:p-6">
-        {mode !== "catalog" && <div className="mb-5"><h2 className="font-headline text-lg font-semibold text-on-surface">{provider.name}</h2><p className="mt-1 text-sm text-on-surface-variant">{t(mode === "domains" ? "connections.domainWorkspaceHelp" : "connections.automationWorkspaceHelp")}</p><p className="mt-2 text-xs text-on-surface-variant">{t(livePingFailed ? "connections.livePingRetry" : "connections.livePingHelp")}{livePingCheckedAt && <> · <time dateTime={livePingCheckedAt}>{new Date(livePingCheckedAt).toLocaleTimeString()}</time></>}</p></div>}
+        {mode !== "catalog" && <div className="mb-5"><h2 className="font-headline text-lg font-semibold text-on-surface">{provider.name}</h2><p className="mt-1 text-sm text-on-surface-variant">{t(mode === "domains" ? "connections.domainWorkspaceHelp" : "connections.automationWorkspaceHelp")}</p>{(probing || liveLocationsKey !== "[]") && <RefreshCountdown state={livePollState} loading={probing} failed={livePingFailed} checkedAt={livePingCheckedAt} t={t} />}</div>}
         {mode === "domains" && <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
           <nav aria-label={t("connections.chooseRoute")} className="flex gap-2 overflow-x-auto md:flex-col">
             {providerRules.map(rule => <button type="button" key={rule.id} aria-current={rule.id === activeRuleId ? "true" : undefined} onClick={() => onSelectRule(rule.id)} className={`min-w-44 rounded-lg border p-3 text-left md:min-w-0 ${rule.id === activeRuleId ? "border-primary/30 bg-primary/10 text-primary" : "border-outline-variant/15 text-on-surface-variant hover:bg-surface-container-high"}`}>

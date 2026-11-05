@@ -104,3 +104,13 @@
 .progress-stripe {
   animation: progress-slide 1.2s linear infinite;
 }
+
+@keyframes activity-rotate { to { transform: rotate(360deg); } }
+@keyframes operation-sweep { from { transform: translateX(-110%); } to { transform: translateX(410%); } }
+.activity-spinner { animation: activity-rotate 1.15s linear infinite; }
+.operation-sweep { animation: operation-sweep 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+.refresh-countdown-ring { transition: stroke-dashoffset 900ms linear; }
+@media (prefers-reduced-motion: reduce) {
+  .activity-spinner, .operation-sweep, .progress-stripe { animation: none; }
+  .refresh-countdown-ring { transition: none; }
+}

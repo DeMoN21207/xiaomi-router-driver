@@ -45,3 +45,17 @@ test("hidden pages start no requests, and a failed probe does not stop future ch
   env.change("visible");await Promise.resolve();assert.equal(calls, 1);
   await env.tick();assert.equal(calls, 2);stop();
 });
+
+test("polling reports the actual next tick and pauses the countdown while hidden", async () => {
+  const env = environment();const states=[];let now=2_000,release;
+  const stop=startVisiblePolling(()=>new Promise(resolve=>{release=resolve;}),{...env.options,nowFn:()=>now,onState:state=>states.push(state)});
+  try {
+    assert.equal(states.at(-1)?.phase,"running");
+    assert.equal(states.at(-1)?.nextRunAt,12_000);
+    now=5_000;release();await Promise.resolve();await Promise.resolve();
+    assert.equal(states.at(-1)?.phase,"waiting");
+    assert.equal(states.at(-1)?.nextRunAt,12_000,"completion must not restart the interval");
+    env.change("hidden");assert.equal(states.at(-1)?.phase,"paused");assert.equal(states.at(-1)?.nextRunAt,null);
+    now=50_000;env.change("visible");assert.equal(states.at(-1)?.phase,"running");assert.equal(states.at(-1)?.nextRunAt,60_000);
+  } finally { stop();release?.(); }
+});
