@@ -86,7 +86,7 @@ func TestRenderCronBootstrapScript(t *testing.T) {
 		`UPDATE_LOCK="/tmp/vpn-manager.updating"`,
 		`RUNNING_EXE="$(readlink -f "/proc/$PID/exe" 2>/dev/null)"`,
 		`RUNNING_EXE="${RUNNING_EXE% (deleted)}"`,
-		`[ "$RUNNING_EXE" = "$EXPECTED_EXE" ] && exit 0`,
+		`[ "$RUNNING_EXE" = "$EXPECTED_EXE" ] && return 0`,
 		`for PROC_EXE in /proc/[0-9]*/exe; do`,
 		`echo "$PID" >"$PID_FILE"`,
 		`[ -e "$UPDATE_JOURNAL" ] && exit 0`,
@@ -95,7 +95,7 @@ func TestRenderCronBootstrapScript(t *testing.T) {
 		`export VPN_MANAGER_PORT="$PORT"`,
 		`export PATH`,
 		`/sbin/start-stop-daemon -S -q -b -m -p "$PID_FILE" -x "$PROG"`,
-		`"$PROG" >>"$LOG_FILE" 2>&1 </dev/null &`,
+		`"$PROG" >>"$LOG_FILE" 2>&1 </dev/null 9>&- &`,
 	} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("renderCronBootstrapScript() missing fragment %q", fragment)

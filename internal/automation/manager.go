@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"xiomi-router-driver/internal/config"
+	"xiomi-router-driver/internal/fileutil"
 )
 
 const serviceName = "vpn-manager"
@@ -184,7 +185,7 @@ func (m *Manager) installCronWatchdog() error {
 	}
 
 	script := renderCronBootstrapScript(m.binaryPath, m.rootDir, m.port)
-	if err := os.WriteFile(m.bootstrapScriptPath(), []byte(script), 0o755); err != nil {
+	if err := fileutil.WriteFileAtomic(m.bootstrapScriptPath(), []byte(script), 0o755); err != nil {
 		return fmt.Errorf("write cron bootstrap script: %w", err)
 	}
 
@@ -267,10 +268,21 @@ PID_FILE="/tmp/vpn-manager.pid"
 UPDATE_JOURNAL="$ROOT_DIR/.update-journal.json"
 UPDATE_LOCK="/tmp/vpn-manager.updating"
 WATCHDOG_LOCK="/tmp/vpn-manager-watchdog.lock"
+WATCHDOG_FLOCK="/tmp/vpn-manager-watchdog.flock"
 PATH="$ROOT_DIR/bin:$ROOT_DIR/.vpn-manager/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Cron remains the persistent minute launcher. These five bounded children
+# provide checks between ticks, even if an earlier check is slow or exits.
+SELF="$0"
+if [ "${1:-}" != "--once" ]; then
+	for DELAY in 10 20 30 40 50; do
+		(sleep "$DELAY" && [ -x "$SELF" ] && exec "$SELF" --once) </dev/null >/dev/null 2>&1 &
+	done
+fi
 
 [ -x "$PROG" ] || exit 0
 EXPECTED_EXE="$(readlink -f "$PROG" 2>/dev/null)"
+manager_is_running() {
 if [ -r "$PID_FILE" ]; then
 	PID="$(cat "$PID_FILE" 2>/dev/null)"
 	case "$PID" in
@@ -279,7 +291,7 @@ if [ -r "$PID_FILE" ]; then
 	if [ -n "$PID" ] && [ -d "/proc/$PID" ]; then
 		RUNNING_EXE="$(readlink -f "/proc/$PID/exe" 2>/dev/null)"
 		RUNNING_EXE="${RUNNING_EXE%% (deleted)}"
-		[ "$RUNNING_EXE" = "$EXPECTED_EXE" ] && exit 0
+		[ "$RUNNING_EXE" = "$EXPECTED_EXE" ] && return 0
 	fi
 fi
 for PROC_EXE in /proc/[0-9]*/exe; do
@@ -290,13 +302,28 @@ for PROC_EXE in /proc/[0-9]*/exe; do
 		PID="${PROC_EXE#/proc/}"
 		PID="${PID%%/*}"
 		echo "$PID" >"$PID_FILE"
-		exit 0
+		return 0
 	fi
 done
+return 1
+}
+manager_is_running && exit 0
 [ -e "$UPDATE_JOURNAL" ] && exit 0
 [ -e "$UPDATE_LOCK" ] && exit 0
-mkdir "$WATCHDOG_LOCK" 2>/dev/null || exit 0
-trap 'rmdir "$WATCHDOG_LOCK" 2>/dev/null' EXIT INT TERM
+if command -v flock >/dev/null 2>&1; then
+	umask 077
+	exec 9>>"$WATCHDOG_FLOCK" || exit 0
+	flock -n 9 || exit 0
+else
+	mkdir "$WATCHDOG_LOCK" 2>/dev/null || exit 0
+	trap 'rmdir "$WATCHDOG_LOCK" 2>/dev/null' EXIT INT TERM
+fi
+# Another launcher, disable or update may have won while we acquired the lock.
+[ -x "$SELF" ] || exit 0
+[ -x "$PROG" ] || exit 0
+[ -e "$UPDATE_JOURNAL" ] && exit 0
+[ -e "$UPDATE_LOCK" ] && exit 0
+manager_is_running && exit 0
 rm -f "$PID_FILE"
 
 export VPN_MANAGER_ROOT="$ROOT_DIR"
@@ -304,12 +331,17 @@ export VPN_MANAGER_PORT="$PORT"
 export PATH
 
 if [ -x /sbin/start-stop-daemon ]; then
-	/sbin/start-stop-daemon -S -q -b -m -p "$PID_FILE" -x "$PROG"
-	exit 0
+	/sbin/start-stop-daemon -S -q -b -m -p "$PID_FILE" -x "$PROG" 9>&- || exit 1
+else
+	"$PROG" >>"$LOG_FILE" 2>&1 </dev/null 9>&- &
+	echo "$!" >"$PID_FILE"
 fi
-
-"$PROG" >>"$LOG_FILE" 2>&1 </dev/null &
-echo "$!" >"$PID_FILE"
+# Hold the launch lock until the background child has exec'd the manager.
+for ATTEMPT in 1 2 3; do
+	manager_is_running && exit 0
+	sleep 1
+done
+exit 1
 	`, escapeShellDoubleQuoted(binaryPath), escapeShellDoubleQuoted(rootDir), escapeShellDoubleQuoted(port))
 }
 
