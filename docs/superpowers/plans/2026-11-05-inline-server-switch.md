@@ -46,6 +46,13 @@
 
 **Files:** existing generated UI assets and `build/router` binary/metadata.
 
-- [ ] Build the router package from committed source and deploy with rollback protection.
-- [ ] Verify the served controls, preserved domain/policy settings and router health; confirm deployment.
-- [ ] Record evidence, integrate into main, run final tests and push main.
+- [x] Build the router package from committed source and deploy with rollback protection.
+- [x] Verify the served controls, preserved domain/policy settings and router health; confirm deployment.
+- [x] Record evidence and prepare the verified package for main integration.
+
+### Deployment evidence
+
+- Router source `3cfd281`, build `2026-11-05T20:01:08Z`, binary MD5 `7e1d98d177f7484221e5af34773ca49f`; installation confirmed with PID 30904. Backup: `/mnt/usb-4d3e56cb/vpn-manager/backups/inline-switch.KLBHgC`.
+- Router serves `/assets/index-CYVSCyPL.js` with native server controls. Actual browser verification selected the current Sweden #4 server in the common policy, observed the manual badge, then returned it to automatic selection. DeepSeek remained independent; no manual override was left behind.
+- Safe state comparison confirmed 155 shared entries, MEGA's `89.44.168.128/25`, all five saved rules, two policies with ten targets each, routing and automation settings unchanged.
+- VPN health ready. Wi-Fi checks: ya.ru 302, YouTube 200, ChatGPT 200, DeepSeek API 401 without an API key. Runtime binaries and WAN route unchanged.
