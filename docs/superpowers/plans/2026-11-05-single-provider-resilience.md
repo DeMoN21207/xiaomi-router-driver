@@ -28,16 +28,16 @@
 
 **Files:** `internal/automation/manager.go`, `internal/automation/manager_test.go`, new `internal/automation/cron_watchdog_test.go`.
 
-- [ ] Add failing tests for six scheduled checks, non-recursion, removed bootstrap and inherited-lock protection.
-- [ ] Update `renderCronBootstrapScript` and atomic bootstrap installation without changing the cron entry.
-- [ ] Run automation race tests, shell validation and full required checks; independently review the change.
+- [x] Add failing tests for six scheduled checks, non-recursion, removed bootstrap and inherited-lock protection.
+- [x] Update `renderCronBootstrapScript` and atomic bootstrap installation without changing the cron entry.
+- [x] Run automation race tests, shell validation and full required checks; independently review the change.
 
 ## Task 2: Deploy and verify recovery
 
 **Files:** packaged router binary/metadata and spec deployment results.
 
-- [ ] Snapshot safe configuration and stage a rollback-protected update.
-- [ ] Reinstall the same automation settings to refresh the watchdog; verify persistent cron.
-- [ ] Arm a bounded fallback, terminate only the verified manager, measure recovery and verify Wi-Fi, DNS, health and a single process.
-- [ ] Recheck candidates, retain verified backups and rerun a controlled tunnel failover if target settings change.
-- [ ] Preserve data, document evidence, publish the verified package to main.
+- [x] Snapshot safe configuration and stage a rollback-protected update.
+- [x] Reinstall the same automation settings to refresh the watchdog; verify persistent cron.
+- [x] Arm a bounded fallback, terminate only the verified manager, measure recovery and verify Wi-Fi, DNS, health and a single process.
+- [x] Recheck candidates, retain verified backups and rerun a controlled tunnel failover if target settings change.
+- [x] Preserve data, document evidence and prepare the verified router package for main integration.
