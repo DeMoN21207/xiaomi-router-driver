@@ -13,6 +13,6 @@
 - [x] Verify removing the final custom entry preserves the server and shared selection.
 - [x] Verify desktop/mobile layouts and shared/custom checkbox interactions using synthetic data.
 - [x] Run Go race tests, frontend tests/build, and independent review.
-- [ ] Integrate into main and deploy the verified application with rollback protection; check actual Wi-Fi routes.
+- [x] Integrate into main and deploy the verified application with rollback protection; check actual Wi-Fi routes.
 
 **Review focus:** Existing independent policies; custom entries on reserve servers; empty custom lists; duplicate shared/custom entries; failed saves retaining the draft and saved configuration.
