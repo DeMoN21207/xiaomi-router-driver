@@ -183,6 +183,7 @@ func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state conf
 		return false
 	}
 	next := make(map[string]priorityDecision)
+	ctx = context.WithValue(ctx, priorityProbeCycleKey{}, &priorityProbeCycle{active: make(map[string]*priorityCycleProbe)})
 	for _, policy := range state.PriorityPolicies {
 		decision, ok := s.evaluatePriorityPolicyLocked(ctx, state, snapshot, policy, now)
 		if ok {
@@ -593,7 +594,7 @@ func (s *Supervisor) priorityTargetProbe(ctx context.Context, state config.State
 				return providerProbeResult{Healthy: false, Detail: firstNonEmpty(item.StatusDetail, fmt.Sprintf("subscription location %s is not running", location)), Location: location}
 			}
 			if strings.TrimSpace(item.InterfaceName) != "" {
-				probe := s.subscriptionTunnelProbe(ctx, item.InterfaceName, item.FWMark)
+				probe := s.priorityTunnelProbe(ctx, item.InterfaceName, item.FWMark)
 				probe.Location = location
 				s.cacheProviderProbe(standbyProbeKey(provider, location), probe)
 				return probe

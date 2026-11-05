@@ -92,3 +92,28 @@ func TestRapidPriorityEvaluationDoesNotWaitForICMPCollection(t *testing.T) {
 		t.Fatal("failure evaluation blocked on ICMP ping collection")
 	}
 }
+
+func TestRapidPriorityPoliciesShareActiveProbeOnlyWithinOneCycle(t *testing.T) {
+	s, state, _ := latencyPolicyFixture(t)
+	state.Automation.FailoverFailureSeconds = 6
+	second := state.PriorityPolicies[0]
+	second.ID = "second-policy"
+	state.PriorityPolicies = append(state.PriorityPolicies, second)
+	s.applyState = func(context.Context, config.State) error { return nil }
+	s.priority.measurePings = nil
+	for _, policy := range state.PriorityPolicies {
+		s.priority.decisions[policy.ID] = priorityDecision{ActiveLocation: "Germany", Mode: "provider", Since: time.Now().Add(-time.Hour)}
+	}
+	var calls int
+	s.probeTunnel = func(context.Context, string, string) providerProbeResult {
+		calls++
+		return providerProbeResult{Healthy: true}
+	}
+	snapshot := status.Snapshot{WAN: status.WANStatus{State: "up"}, SubscriptionRuntime: []subscription.RuntimeSnapshot{{Key: "provider_1::germany", Status: "running", InterfaceName: "sb-active"}}}
+	for cycle := 1; cycle <= 2; cycle++ {
+		s.maybePriorityPolicies(t.Context(), state, snapshot)
+		if calls != cycle {
+			t.Fatalf("after cycle %d, active tunnel checked %d times; want one fresh check per cycle", cycle, calls)
+		}
+	}
+}
