@@ -1101,7 +1101,7 @@ func (h *Handler) handlePriorityPolicyOverride(w http.ResponseWriter, r *http.Re
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		policy, ok := findPriorityPolicy(state.PriorityPolicies, id)
+		policy, ok := findRuntimePriorityPolicy(state, id)
 		if !ok {
 			writeError(w, http.StatusNotFound, fmt.Errorf("priority policy %s not found", id))
 			return
@@ -1448,7 +1448,7 @@ func (h *Handler) handleRules(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"rules": state.Rules})
+		writeJSON(w, http.StatusOK, map[string]any{"rules": state.Rules, "effectiveRules": state.EffectiveRules()})
 	case http.MethodPost:
 		var req ruleRequest
 		if err := decodeJSON(r, &req); err != nil {

@@ -54,3 +54,27 @@ func TestSharedRouteCanClearOwnListWithoutLosingServerOrSharedSelection(t *testi
 		t.Fatalf("clearing own entries changed other routing lists: %+v", effective)
 	}
 }
+
+func TestRulesAPIReportsEffectiveSharedOwnershipAlongsideSavedLists(t *testing.T) {
+	handler, manager, _, _ := newAPITestHandler(t)
+	state := config.DefaultState()
+	state.Providers = []config.Provider{testProvider("vpn", "VPN", true)}
+	state.Rules = []config.Rule{
+		{ID: "main", Name: "Main", ProviderID: "vpn", SelectedLocation: "Latvia", Enabled: true},
+		{ID: "reserve", Name: "Reserve", ProviderID: "vpn", SelectedLocation: "Sweden", Domains: []string{"youtube.com", "api.youtube.com", "198.51.100.1"}, Enabled: true},
+	}
+	state.SharedDomains = config.SharedDomainList{Entries: []string{"youtube.com", "198.51.100.0/24"}, RuleIDs: []string{"main", "reserve"}}
+	if _, err := manager.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	response := requestJSON[struct {
+		Rules          []config.Rule `json:"rules"`
+		EffectiveRules []config.Rule `json:"effectiveRules"`
+	}](t, handler, http.MethodGet, "/api/rules", nil, http.StatusOK)
+	if len(response.Rules) != 2 || len(response.Rules[1].Domains) != 2 {
+		t.Fatalf("saved own list was not retained: %+v", response.Rules)
+	}
+	if len(response.EffectiveRules) != 2 || response.EffectiveRules[1].Enabled || len(response.EffectiveRules[1].Domains) != 0 {
+		t.Fatalf("legacy copies must not appear as a second active route: %+v", response.EffectiveRules)
+	}
+}
