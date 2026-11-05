@@ -248,6 +248,10 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("level must be info, warn, or error"))
 		return
 	}
+	if r.URL.Query().Get("pagination") == "numbered" {
+		h.handleNumberedEvents(w, r, level, limit, offset)
+		return
+	}
 	if r.URL.Query().Get("pagination") == "cursor" {
 		if offset != 0 {
 			writeError(w, http.StatusBadRequest, errors.New("offset cannot be combined with cursor pagination"))

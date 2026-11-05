@@ -15,14 +15,14 @@ export default function EventsPage() {
   const [levelCounts, setLevelCounts] = useState({ info: 0, warn: 0, error: 0 });
   const [filter, setFilter] = useState("");
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [clearing, setClearing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [error, setError] = useState("");
-  const [hasMore, setHasMore] = useState(false);
   const requestRef = useRef(null);
-  const cursorRef = useRef("");
-  const offsetRef = useRef(0);
+  const snapshotRef = useRef("");
+  const listRef = useRef(null);
   const clearingRef = useRef(false);
   const datasetFilterRef = useRef("");
 
@@ -36,20 +36,7 @@ export default function EventsPage() {
     [t],
   );
 
-  const eventsURL = useCallback((offset = 0, cursor = "") => {
-    const params = new URLSearchParams({
-      limit: String(PAGE_SIZE),
-      pagination: "cursor",
-    });
-    if (cursor) params.set("cursor", cursor);
-    else if (offset) { params.delete("pagination"); params.set("offset", String(offset)); }
-    if (filter) {
-      params.set("level", filter);
-    }
-    return `/api/events?${params.toString()}`;
-  }, [filter]);
-
-  const refresh = useCallback(async () => {
+  const loadPage = useCallback(async (number = 1, resetSnapshot = false) => {
     if (clearingRef.current) return;
     requestRef.current?.abort();
     const controller = new AbortController();
@@ -58,58 +45,40 @@ export default function EventsPage() {
       datasetFilterRef.current = filter;
       setEvents([]);
       setTotal(0);
-      setHasMore(false);
-      cursorRef.current = "";
-      offsetRef.current = 0;
+      setPage(1);
+      setTotalPages(1);
+      snapshotRef.current = "";
     }
     setLoading(true);
-    setLoadingMore(false);
+    setConfirmClear(false);
     try {
-      const data = await fetchJSON(eventsURL(0), { signal: controller.signal });
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE), pagination: "numbered", page: String(number) });
+      if (filter) params.set("level", filter);
+      if (!resetSnapshot && snapshotRef.current) params.set("snapshot", snapshotRef.current);
+      const data = await fetchJSON(`/api/events?${params}`, { signal: controller.signal });
       if (controller.signal.aborted) return;
       setEvents(data.events || []);
       setTotal(data.total || 0);
       setLevelCounts(data.levelCounts || { info: 0, warn: 0, error: 0 });
       setError("");
-      cursorRef.current = data.nextCursor || "";
-      offsetRef.current = data.events?.length || 0;
-      setHasMore(data.hasMore ?? offsetRef.current < data.total);
+      setPage(data.page);
+      setTotalPages(data.totalPages);
+      snapshotRef.current = data.snapshot;
     } catch (err) {
       if (!controller.signal.aborted) setError(err.message);
     } finally {
       if (!controller.signal.aborted && requestRef.current === controller) { setLoading(false); requestRef.current = null; }
     }
-  }, [eventsURL, filter]);
+  }, [filter]);
 
   useEffect(() => {
-    void refresh();
+    void loadPage(1, true);
     return () => requestRef.current?.abort();
-  }, [refresh]);
+  }, [loadPage]);
 
-  async function loadMore() {
-    if (requestRef.current || clearingRef.current) return;
-    const controller = new AbortController();
-    requestRef.current = controller;
-    setLoadingMore(true);
-    try {
-      const data = await fetchJSON(eventsURL(offsetRef.current, cursorRef.current), { signal: controller.signal });
-      if (controller.signal.aborted) return;
-      const newEvents = data.events || [];
-      setEvents((prev) => {
-        const ids = new Set(prev.map(event => event.id));
-        return [...prev, ...newEvents.filter(event => !ids.has(event.id))];
-      });
-      setTotal(data.total || 0);
-      setLevelCounts(data.levelCounts || { info: 0, warn: 0, error: 0 });
-      setError("");
-      cursorRef.current = data.nextCursor || "";
-      offsetRef.current += newEvents.length;
-      setHasMore(data.hasMore ?? offsetRef.current < data.total);
-    } catch (err) {
-      if (!controller.signal.aborted) setError(err.message);
-    } finally {
-      if (!controller.signal.aborted && requestRef.current === controller) { setLoadingMore(false); requestRef.current = null; }
-    }
+  function goToPage(number) {
+    void loadPage(number);
+    listRef.current?.scrollIntoView({ block: "start" });
   }
 
   async function clearAll() {
@@ -119,16 +88,15 @@ export default function EventsPage() {
     requestRef.current = null;
     setClearing(true);
     setLoading(false);
-    setLoadingMore(false);
     try {
       await fetchJSON("/api/events", { method: "DELETE" });
       setEvents([]);
       setTotal(0);
       setLevelCounts({ info: 0, warn: 0, error: 0 });
       setError("");
-      setHasMore(false);
-      cursorRef.current = "";
-      offsetRef.current = 0;
+      setPage(1);
+      setTotalPages(1);
+      snapshotRef.current = "";
     } catch (err) {
       setError(err.message);
     } finally {
@@ -148,7 +116,7 @@ export default function EventsPage() {
               <span className="status-glow-success relative inline-flex h-2 w-2 rounded-full bg-secondary" />
             </span>
             <p className="font-mono text-xs uppercase tracking-widest text-on-surface-variant">
-              {loading ? t("events.loading") : `${events.length} / ${total} ${t("events.entries")}`}
+              {loading ? t("events.loading") : `${total} ${t("events.entries")}`}
             </p>
           </div>
         </div>
@@ -187,7 +155,7 @@ export default function EventsPage() {
           )}
           <button
             type="button"
-            onClick={refresh}
+            onClick={() => void loadPage(1, true)}
             disabled={loading || clearing}
             className="flex items-center gap-2 rounded-lg border border-primary/20 px-4 py-2 text-xs font-bold uppercase tracking-wider text-primary transition-colors duration-100 hover:bg-primary/5 hover:text-on-surface active:scale-95"
           >
@@ -233,7 +201,9 @@ export default function EventsPage() {
         })}
       </div>
 
-      <div className="space-y-3">
+      {total > 0 && <EventPagination page={page} totalPages={totalPages} total={total} count={events.length} disabled={loading || clearing} onPageChange={goToPage} t={t} />}
+
+      <div ref={listRef} aria-busy={loading} className="scroll-mt-24 space-y-3">
         {loading ? <p className="p-6 text-sm text-on-surface-variant">{t("events.loading")}</p> : events.length === 0 ? (
           <div className="rounded-xl bg-surface-container-low p-12 text-center">
             <Icon name="history" className="mx-auto mb-3 h-12 w-12 text-outline-variant" />
@@ -261,28 +231,34 @@ export default function EventsPage() {
           })
         )}
 
-        {hasMore && (
-          <button
-            type="button"
-            onClick={loadMore}
-            disabled={loading || loadingMore || clearing}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-outline-variant/20 bg-surface-container-low py-4 text-sm font-medium text-primary transition-colors hover:bg-surface-container disabled:opacity-50"
-          >
-            {loadingMore ? (
-              <>
-                <Icon name="hourglass_empty" className="h-4 w-4 animate-spin" />
-                {t("events.loadingMore")}
-              </>
-            ) : (
-              <>
-                <Icon name="expand_more" className="h-5 w-5" />
-                {t("events.loadMore", { count: String(Math.min(PAGE_SIZE, total - events.length)) })}
-              </>
-            )}
-          </button>
-        )}
-        {!loading && !hasMore && events.length > 0 && events.length < total && <p className="text-sm text-on-surface-variant">{t("events.changedRefresh")}</p>}
       </div>
+      {total > PAGE_SIZE && <EventPagination page={page} totalPages={totalPages} total={total} count={events.length} disabled={loading || clearing} onPageChange={goToPage} t={t} />}
+    </div>
+  );
+}
+
+function EventPagination({ page, totalPages, total, count, disabled, onPageChange, t }) {
+  const visible = new Set([1, totalPages, page - 1, page, page + 1]);
+  if (page <= 3) [2, 3, 4].forEach(number => visible.add(number));
+  if (page >= totalPages - 2) [totalPages - 3, totalPages - 2, totalPages - 1].forEach(number => visible.add(number));
+  const pages = [...visible].filter(number => number >= 1 && number <= totalPages).sort((a, b) => a - b);
+  const items = [];
+  for (const number of pages) {
+    const previous = items.at(-1);
+    if (typeof previous === "number" && number - previous > 1) items.push(`gap-${number}`);
+    items.push(number);
+  }
+  const buttonClass = "inline-flex h-10 min-w-10 items-center justify-center rounded-lg border px-2 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-default disabled:opacity-40";
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+      <p aria-live="polite" className="text-sm text-on-surface-variant">{t("events.pageStatus", { from: (page - 1) * PAGE_SIZE + 1, to: (page - 1) * PAGE_SIZE + count, total })}</p>
+      <nav aria-label={t("events.pagination")} className="flex flex-wrap items-center gap-1">
+        <button type="button" aria-label={t("events.previousPage")} title={t("events.previousPage")} disabled={disabled || page <= 1} onClick={() => onPageChange(page - 1)} className={`${buttonClass} border-outline-variant/20 text-on-surface-variant hover:bg-surface-container`}><Icon name="chevron_left" className="h-4 w-4" /></button>
+        {items.map(item => typeof item === "number" ? (
+          <button key={item} type="button" aria-label={t("events.goToPage", { page: item })} aria-current={item === page ? "page" : undefined} disabled={disabled || item === page} onClick={() => onPageChange(item)} className={`${buttonClass} ${item === page ? "border-primary/30 bg-primary/15 text-primary disabled:opacity-100" : "border-outline-variant/20 text-on-surface-variant hover:bg-surface-container"}`}>{item}</button>
+        ) : <span key={item} aria-hidden="true" className="px-1 text-outline">…</span>)}
+        <button type="button" aria-label={t("events.nextPage")} title={t("events.nextPage")} disabled={disabled || page >= totalPages} onClick={() => onPageChange(page + 1)} className={`${buttonClass} border-outline-variant/20 text-on-surface-variant hover:bg-surface-container`}><Icon name="chevron_right" className="h-4 w-4" /></button>
+      </nav>
     </div>
   );
 }
