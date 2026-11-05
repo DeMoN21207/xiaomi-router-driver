@@ -20,4 +20,9 @@
 - Before repair, HTTPS over the physical Wi-Fi interface timed out. After retiring stale DNS fragments, tests using the router's DNS and `curl -4 --interface en0 --noproxy '*' --resolve ...` returned: ordinary internet 302, YouTube 301, ChatGPT 200, DeepSeek models 401 without an API key.
 - The one-time retired-fragment backup is `/mnt/usb-4d3e56cb/vpn-manager/backups/wifi-stale-dns.DpmkJH`.
 
-Deployment must preserve the installed VPN executables, data and startup configuration; verify the saved rule/policy fingerprint, active targets, tunnel routes and physical Wi-Fi access after activation. Keep the previous application binary available for rollback.
+## Deployment result
+
+- Application source commit `812668e` was installed with a staged binary swap and a 240-second automatic rollback. The previous binary, database snapshot and runtime snapshot are retained in `/mnt/usb-4d3e56cb/vpn-manager/backups/wifi-priority.Akpgof`.
+- A legacy fixed-route pin still forced ChatGPT destinations to mark `0x2` after the active rotating tunnel moved to table 101 / mark `0x1`. That obsolete binding was retired with its IP destinations retained in the general protection set; its backup is in the same staging folder under `legacy-pin/`.
+- After activation, physical Wi-Fi checks returned ordinary internet 302, `www.youtube.com` 200, ChatGPT 200 and DeepSeek models 401. Both saved Priority policy IDs reported active locations.
+- The before/after rule, policy and domain fingerprint was identical. WAN routing and installed OpenVPN/sing-box binary checksums were unchanged. The new application binary was verified and the rollback timer was disarmed only after those checks passed.
