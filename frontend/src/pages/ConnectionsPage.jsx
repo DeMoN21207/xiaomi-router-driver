@@ -4,6 +4,7 @@ import SharedDomainEditor from "../components/SharedDomainEditor.jsx";
 import RoutingOverview from "../components/RoutingOverview.jsx";
 import SectionTabs from "../components/SectionTabs.jsx";
 import ServerPing from "../components/ServerPing.jsx";
+import { startVisiblePolling } from "../visiblePolling.js";
 import { parseDomainInput } from "../domainInput.js";
 import { useI18n } from "../i18n.jsx";
 import Icon from "../components/Icon.jsx";
@@ -716,37 +717,70 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
   const [sourceDraft, setSourceDraft] = useState(provider.source);
   const [savingSource, setSavingSource] = useState(false);
   const [newRouteLoc, setNewRouteLoc] = useState("");
-  const probedRef = useRef(false);
+  const [livePings, setLivePings] = useState({});
+  const [livePingCheckedAt, setLivePingCheckedAt] = useState("");
+  const [livePingFailed, setLivePingFailed] = useState(false);
+
+  const sharedPrimary = sharedDomains?.ruleIds?.find(id => providerRules.some(rule => rule.id === id && rule.enabled));
+  const implicitTargets = sharedPrimary && sharedDomains.entries?.length && !priorityPolicies.some(policy => policy.ruleId === sharedPrimary)
+    ? sharedDomains.ruleIds.map(id => providerRules.find(rule => rule.id === id && rule.enabled)?.selectedLocation).filter(Boolean) : [];
+  const liveNames = new Set(mode === "automation"
+    ? [...priorityPolicies.flatMap(policy => (policy.targets || []).map(target => target.location)), ...implicitTargets]
+    : providerRules.map(rule => rule.selectedLocation));
+  const liveLocationsKey = JSON.stringify((probeLocations || []).filter(location => liveNames.has(location.name)).map(({ name, address, type, endpointError }) => ({ name, address, type, endpointError })));
+  const fallbackPings = new Map([...priorityStatusMap.values()].filter(policy => policy.providerId === provider.id).flatMap(policy => (policy.targets || []).map(target => [target.location, target])));
+  const pingForLocation = location => livePings[location] || fallbackPings.get(location);
+
+  useEffect(() => {
+    setLivePings({});
+    setLivePingCheckedAt("");
+    setLivePingFailed(false);
+    if (mode === "catalog") return;
+    const locations = JSON.parse(liveLocationsKey);
+    if (!locations.length) return;
+    return startVisiblePolling(async signal => {
+      try {
+        const result = await fetchJSON("/api/providers/latency", {
+          method: "POST", signal, timeoutMs: 8_000, trackLoading: false,
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify({ locations }),
+        });
+        if (signal.aborted) return;
+        const checkedAt = new Date().toISOString();
+        const next = Object.fromEntries((result.locations || []).map(location => [location.name, { pingMs: location.latencyMs || 0, pingError: location.latencyError || location.endpointError || "", pingCheckedAt: checkedAt, pingLive: true }]));
+        setLivePings(previous => ({ ...previous, ...next }));
+        setLivePingCheckedAt(checkedAt);
+        setLivePingFailed(false);
+      } catch {
+        if (!signal.aborted) setLivePingFailed(true);
+      }
+    });
+  }, [mode, liveLocationsKey, provider.source, provider.type]);
 
   const activeRuleId = providerRules.some(rule => rule.id === selectedRuleId) ? selectedRuleId : providerRules[0]?.id;
   const refreshingSubscription = provider.type === "subscription" && refreshingProviderId === provider.id;
   const providerActionBusy = Boolean(refreshingProviderId);
 
-  async function probeProvider() {
+  // Reload the catalogue once when its source changes, independently of ping ticks.
+  useEffect(() => {
+    const controller = new AbortController();
     setProbing(true);
     setProbeLocations(null);
-    try {
-      const result = await fetchJSON("/api/providers/probe", {
-        method: "POST",
-        trackLoading: false,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: provider.type, source: provider.source }),
-      });
-      setProbeLocations(result.locations || []);
-    } catch (error) {
-      showToast(error.message, true);
-    } finally {
-      setProbing(false);
-    }
-  }
-
-  // Auto-probe locations when expanding a provider
-  useEffect(() => {
-    if (!probeLocations && !probedRef.current) {
-      probedRef.current = true;
-      probeProvider();
-    }
-  }, [provider.id]);
+    void (async () => {
+      try {
+        const result = await fetchJSON("/api/providers/probe", {
+          method: "POST", signal: controller.signal, trackLoading: false,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: provider.type, source: provider.source }),
+        });
+        if (!controller.signal.aborted) setProbeLocations(result.locations || []);
+      } catch (error) {
+        if (!controller.signal.aborted) showToast(error.message, true);
+      } finally {
+        if (!controller.signal.aborted) setProbing(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [provider.id, provider.source, provider.type, showToast]);
 
   async function applyAndRefresh() {
     try {
@@ -855,11 +889,12 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
       </div>}
 
       <div className="border-t border-outline-variant/20 p-4 sm:p-6">
-        {mode !== "catalog" && <div className="mb-5"><h2 className="font-headline text-lg font-semibold text-on-surface">{provider.name}</h2><p className="mt-1 text-sm text-on-surface-variant">{t(mode === "domains" ? "connections.domainWorkspaceHelp" : "connections.automationWorkspaceHelp")}</p></div>}
+        {mode !== "catalog" && <div className="mb-5"><h2 className="font-headline text-lg font-semibold text-on-surface">{provider.name}</h2><p className="mt-1 text-sm text-on-surface-variant">{t(mode === "domains" ? "connections.domainWorkspaceHelp" : "connections.automationWorkspaceHelp")}</p><p className="mt-2 text-xs text-on-surface-variant">{t(livePingFailed ? "connections.livePingRetry" : "connections.livePingHelp")}{livePingCheckedAt && <> · <time dateTime={livePingCheckedAt}>{new Date(livePingCheckedAt).toLocaleTimeString()}</time></>}</p></div>}
         {mode === "domains" && <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
           <nav aria-label={t("connections.chooseRoute")} className="flex gap-2 overflow-x-auto md:flex-col">
             {providerRules.map(rule => <button type="button" key={rule.id} aria-current={rule.id === activeRuleId ? "true" : undefined} onClick={() => onSelectRule(rule.id)} className={`min-w-44 rounded-lg border p-3 text-left md:min-w-0 ${rule.id === activeRuleId ? "border-primary/30 bg-primary/10 text-primary" : "border-outline-variant/15 text-on-surface-variant hover:bg-surface-container-high"}`}>
               <span className="block text-sm font-medium">{rule.selectedLocation || rule.name}</span>
+              <span className="mt-1 block"><ServerPing target={pingForLocation(rule.selectedLocation)} t={t} /></span>
               <span className="mt-1 block text-xs text-on-surface-variant">{t(sharedDomains?.ruleIds?.includes(rule.id) ? "connections.sharedAndOwn" : "connections.ownOnly")}</span>
             </button>)}
           </nav>
@@ -873,6 +908,7 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
               <RuleBlock
                 key={rule.id}
                 rule={rule}
+                serverPing={pingForLocation(rule.selectedLocation)}
                 provider={provider}
                 sharedDomains={sharedDomains}
                 sharedBusy={busy}
@@ -903,6 +939,7 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
               policies={priorityPolicies}
               sharedDomains={sharedDomains}
               priorityStatusMap={priorityStatusMap}
+              livePings={livePings}
               probeLocations={probeLocations}
               probing={probing}
               saving={saving}
@@ -941,7 +978,6 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
                       });
                       showToast(t("connections.sourceUpdated"));
                       setEditingSource(false);
-                      probedRef.current = false;
                       setProbeLocations(null);
                       await onDomainsChange();
                     } catch (err) {
@@ -1065,7 +1101,7 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
   );
 }
 
-function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomains, priorityStatusMap, probeLocations, probing, saving, setSaving, onChanged, showToast, setPageError, t }) {
+function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomains, priorityStatusMap, livePings, probeLocations, probing, saving, setSaving, onChanged, showToast, setPageError, t }) {
   const [editingId, setEditingId] = useState("");
   const [draft, setDraft] = useState(defaultPriorityDraft);
   const [newTarget, setNewTarget] = useState("");
@@ -1254,7 +1290,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
                         >
                           {index + 1}. {target.location}
                           {targetStatus?.status === "healthy" ? ` · ${t("connections.serverAvailable")}` : targetStatus?.status === "unhealthy" ? ` · ${t("connections.serverUnavailable")}` : ""}
-                          <span className="ml-2"><ServerPing target={targetStatus} t={t} /></span>
+                          <span className="ml-2"><ServerPing target={livePings[target.location] || targetStatus} t={t} /></span>
                         </span>
                       );
                     })}
@@ -1344,7 +1380,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
                 >
                   <span className="w-6 text-xs font-bold text-outline">{index + 1}</span>
                   <span className="min-w-0 flex-1 truncate text-sm text-on-surface">{location}</span>
-                  <ServerPing target={priorityStatusMap?.get(editingId)?.targets?.find(target => target.location === location)} t={t} />
+                  <ServerPing target={livePings[location] || priorityStatusMap?.get(editingId)?.targets?.find(target => target.location === location)} t={t} />
                   <button type="button" aria-label={t("connections.moveServerUp", { location })} onClick={() => moveTarget(index, index - 1)} disabled={index === 0} className="rounded p-1 text-on-surface-variant hover:text-primary disabled:opacity-30">
                     <Icon name="arrow_drop_up" className="h-4 w-4" />
                   </button>
@@ -1652,7 +1688,7 @@ function formatLocationType(type) {
 }
 
 
-function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsChange, probeLocations, probing, saving, setSaving, failoverOverride, domainHealthMap, onDeleteRule, onDomainsChange, showToast, setPageError, t }) {
+function RuleBlock({ rule, serverPing, provider, sharedDomains, sharedBusy, onSharedDomainsChange, probeLocations, probing, saving, setSaving, failoverOverride, domainHealthMap, onDeleteRule, onDomainsChange, showToast, setPageError, t }) {
   const [domainInput, setDomainInput] = useState("");
   const [showDomainTools, setShowDomainTools] = useState(false);
   const [changingLocation, setChangingLocation] = useState(false);
@@ -1769,9 +1805,10 @@ function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsC
   return (
     <section aria-label={rule.selectedLocation || rule.name} className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-4 sm:p-5">
       <div className="mb-4 flex items-start justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
           <Icon name="location_on" className="h-4 w-4 shrink-0 text-primary" />
           <span className="min-w-0 break-words font-headline text-base font-semibold text-on-surface">{rule.selectedLocation || rule.name}</span>
+          <ServerPing target={serverPing} t={t} />
           <button
             type="button"
             onClick={() => { setChangingLocation((v) => !v); setNewLocation(rule.selectedLocation || ""); }}
