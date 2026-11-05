@@ -51,7 +51,7 @@ func (s *Supervisor) cacheProviderProbe(key string, result providerProbeResult) 
 
 func (s *Supervisor) probeSubscriptionStandby(ctx context.Context, provider config.Provider, location string) providerProbeResult {
 	key := standbyProbeKey(provider, location)
-	if result, ok := s.cachedProviderProbe(key, 15*time.Second); ok {
+	if result, ok := s.cachedProviderProbe(key, 5*time.Second); ok {
 		return result
 	}
 	result := s.checkSubscriptionStandby(ctx, provider, location)

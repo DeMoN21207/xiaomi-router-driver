@@ -50,7 +50,7 @@ func significantPingImprovement(current, candidate priorityServerPing, now time.
 
 // Refresh only the configured candidates, using direct ICMP to their endpoints.
 // Tunnel HTTPS health remains a separate signal; ICMP failure never marks VPN down.
-// The caller serializes refreshes with priorityEvalMu. Network work holds no status lock.
+// The caller serializes refreshes with priorityPingMu. Network work holds no status lock.
 func (s *Supervisor) refreshPriorityServerPings(ctx context.Context, state config.State, now time.Time) {
 	providers := providersIndex(state.Providers)
 	pending := make(map[string]probe.Location)
@@ -139,5 +139,17 @@ func (s *Supervisor) refreshPriorityServerPings(ctx context.Context, state confi
 			next.Ms /= int64(len(next.samples))
 		}
 		s.priority.pings[key] = next
+	}
+}
+
+func (s *Supervisor) updatePriorityServerPings(ctx context.Context, state config.State, now time.Time) {
+	if !s.priorityPingMu.TryLock() {
+		return
+	}
+	refresh := func() { defer s.priorityPingMu.Unlock(); s.refreshPriorityServerPings(ctx, state, now) }
+	if rapidPriorityChecks(state) {
+		go refresh()
+	} else {
+		refresh()
 	}
 }

@@ -20,6 +20,8 @@ type DeviceTrafficHistoryResponse struct {
 	DeviceName            string                      `json:"deviceName"`
 	DeviceMAC             string                      `json:"deviceMac"`
 	Range                 string                      `json:"range"`
+	From                  string                      `json:"from"`
+	To                    string                      `json:"to"`
 	BucketSeconds         int                         `json:"bucketSeconds"`
 	SampleIntervalSeconds int                         `json:"sampleIntervalSeconds"`
 	TotalBytes            uint64                      `json:"totalBytes"`
@@ -67,9 +69,12 @@ func (s *Service) deviceTrafficHistoryWindow(sourceIP string, spec trafficHistor
 		return DeviceTrafficHistoryResponse{}, errors.New("sourceIp is required")
 	}
 
+	spec.Bucket = deviceHistoryBucketDuration(spec.Bucket, s.effectiveSiteTrafficSampleInterval())
 	response := DeviceTrafficHistoryResponse{
 		SourceIP:              sourceIP,
 		Range:                 spec.Name,
+		From:                  from.UTC().Format(time.RFC3339),
+		To:                    to.UTC().Format(time.RFC3339),
 		BucketSeconds:         int(spec.Bucket.Seconds()),
 		SampleIntervalSeconds: int(s.effectiveSiteTrafficSampleInterval().Seconds()),
 		Points:                make([]DeviceTrafficHistoryPoint, 0),
@@ -168,10 +173,22 @@ func parseTrafficHistoryDateInput(raw string) (time.Time, error) {
 	return time.Time{}, err
 }
 
+// Use whole sampling intervals so a regular collector does not create alternating
+// empty bins or uneven sample counts solely because of the chart resolution.
+func deviceHistoryBucketDuration(bucket, sampleInterval time.Duration) time.Duration {
+	if sampleInterval <= 0 {
+		return bucket
+	}
+	return ((bucket + sampleInterval - 1) / sampleInterval) * sampleInterval
+}
+
 func aggregateDeviceTrafficHistory(samples []deviceTrafficHistorySample, spec trafficHistoryRangeSpec, from time.Time, to time.Time, sampleInterval time.Duration, sourceIP string) DeviceTrafficHistoryResponse {
+	spec.Bucket = deviceHistoryBucketDuration(spec.Bucket, sampleInterval)
 	response := DeviceTrafficHistoryResponse{
 		SourceIP:              sourceIP,
 		Range:                 spec.Name,
+		From:                  from.UTC().Format(time.RFC3339),
+		To:                    to.UTC().Format(time.RFC3339),
 		BucketSeconds:         int(spec.Bucket.Seconds()),
 		SampleIntervalSeconds: int(sampleInterval.Seconds()),
 		Points:                []DeviceTrafficHistoryPoint{},

@@ -142,3 +142,19 @@ func testTrafficRoute(providerID string, providerName string, providerType strin
 		TXBytes:       tx,
 	}
 }
+
+func TestTrafficHistoryCustomMatchesPresetGranularity(t *testing.T) {
+	from := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	for _, name := range []string{"1h", "3h", "1d", "3d", "7d", "30d"} {
+		t.Run(name, func(t *testing.T) {
+			spec, _ := parseTrafficHistoryRange(name)
+			got, err := (&Service{}).TrafficHistoryCustom(from.Format(time.RFC3339), from.Add(spec.Lookback).Format(time.RFC3339))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.BucketSeconds != int(spec.Bucket.Seconds()) {
+				t.Fatalf("custom bucket = %d, preset = %d", got.BucketSeconds, int(spec.Bucket.Seconds()))
+			}
+		})
+	}
+}

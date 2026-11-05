@@ -1,3 +1,4 @@
+import { findChartHit, tooltipLeft, trafficPointLabel as formatTrafficPointLabel, averageHistoryRate } from "../chartGeometry.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON } from "../api.js";
 import { Link } from "react-router-dom";
@@ -894,7 +895,7 @@ function DeviceActivityHistorySection({ device, history, range, customFrom, cust
   const points = history?.points ?? [];
   const chart = buildDeviceHistoryChart(points);
   const latestPoint = latestActiveDevicePoint(points);
-  const liveRate = history?.bucketSeconds > 0 ? (latestPoint?.bytes || 0) / history.bucketSeconds : 0;
+  const averageRate = averageHistoryRate(history);
   const hasData = (history?.totalBytes || 0) > 0;
 
   useEffect(() => {
@@ -992,7 +993,7 @@ function DeviceActivityHistorySection({ device, history, range, customFrom, cust
           <SummaryCard label={t("trafficStats.historyRangeTotal")} value={loading ? "..." : formatBytes(history?.totalBytes || 0)} />
           <SummaryCard label={t("trafficStats.historyTunneled")} value={loading ? "..." : formatBytes(history?.tunneledBytes || 0)} />
           <SummaryCard label={t("trafficStats.historyDirect")} value={loading ? "..." : formatBytes(history?.directBytes || 0)} />
-          <SummaryCard label={t("trafficStats.historyLiveRate")} value={loading ? "..." : formatBytesPerSecond(liveRate)} />
+          <SummaryCard label={t("trafficStats.historyAverageRate")} value={loading ? "..." : (averageRate === null ? t("common.notYet") : formatBytesPerSecond(averageRate))} />
         </div>
 
         <div className="mt-4 flex flex-wrap gap-3">
@@ -1184,23 +1185,6 @@ function uniqueDeviceHistoryLabels(labels) {
   });
 }
 
-function formatTrafficPointLabel(value, range) {
-  if (!value) return "";
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  const options = range === "30d"
-    ? { day: "2-digit", month: "short" }
-    : (range === "1h" || range === "3h")
-      ? { hour: "2-digit", minute: "2-digit" }
-      : { day: "2-digit", month: "short", hour: "2-digit" };
-
-  return new Intl.DateTimeFormat(undefined, options).format(date);
-}
-
 function DeviceHistoryChart({ chart, history, device, range, t }) {
   const svgRef = useRef(null);
   const tooltipPoints = chart.tunneled.coords.map((point, index) => ({
@@ -1317,38 +1301,19 @@ function ChartTooltip({ svgRef, points, range, renderContent, mode = "proximity"
     const svg = svgRef.current;
     if (!svg || !points || points.length === 0) return;
 
-    const rect = svg.getBoundingClientRect();
-    const mouseX = event.clientX - rect.left;
-    const mouseY = event.clientY - rect.top;
-    const viewBoxWidth = svg.viewBox.baseVal.width || rect.width || 1;
-    const viewBoxHeight = svg.viewBox.baseVal.height || rect.height || 1;
-
-    let closest = null;
-    let closestDist = Infinity;
-    for (const point of points) {
-      const hits = point.hits?.length ? point.hits : [point];
-      for (const hit of hits) {
-        const pointX = (hit.x / viewBoxWidth) * rect.width;
-        const pointY = (hit.y / viewBoxHeight) * rect.height;
-        const dist = mode === "x"
-          ? Math.abs(pointX - mouseX)
-          : Math.hypot(pointX - mouseX, pointY - mouseY);
-        if (dist < closestDist) {
-          closestDist = dist;
-          closest = { point, x: pointX, y: pointY };
-        }
-      }
-    }
-
-    if (closest && (mode === "x" || mode === "bucket" || closestDist < threshold)) {
+    const closest = findChartHit(points, svg.getScreenCTM(), event.clientX, event.clientY, mode, threshold);
+    const parentRect = svg.parentElement.getBoundingClientRect();
+    if (closest) {
       setActive(closest.point.payload ?? closest.point);
-      setPos({ x: closest.x, y: closest.y });
+      setPos({ x: closest.x - parentRect.left, y: closest.y - parentRect.top });
     } else {
       setActive(null);
     }
   }, [mode, points, svgRef, threshold]);
 
   const handleLeave = useCallback(() => setActive(null), []);
+
+  useEffect(() => { setActive(null); }, [points, range]);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -1365,15 +1330,14 @@ function ChartTooltip({ svgRef, points, range, renderContent, mode = "proximity"
     return null;
   }
 
-  const tooltipWidth = 180;
   const parentWidth = svgRef.current?.parentElement?.offsetWidth || 400;
-  const isRight = pos.x > parentWidth / 2;
+  const tooltipWidth = Math.min(180, parentWidth);
 
   return (
     <div
       className="pointer-events-none absolute z-10 rounded-lg border border-outline-variant/20 bg-surface-container-highest/95 px-3 py-2 shadow-lg backdrop-blur-sm"
       style={{
-        left: isRight ? pos.x - tooltipWidth - 12 : pos.x + 12,
+        left: tooltipLeft(pos.x, parentWidth, tooltipWidth),
         top: Math.max(4, pos.y - 30),
         width: tooltipWidth,
       }}

@@ -322,6 +322,10 @@ func (s *Service) TrafficHistoryCustom(fromStr, toStr string) (TrafficHistoryRes
 	duration := to.Sub(from)
 	var bucket time.Duration
 	switch {
+	case duration <= time.Hour:
+		bucket = 5 * time.Minute
+	case duration <= 3*time.Hour:
+		bucket = 15 * time.Minute
 	case duration <= 24*time.Hour:
 		bucket = time.Hour
 	case duration <= 3*24*time.Hour:

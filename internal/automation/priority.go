@@ -178,7 +178,7 @@ func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state conf
 	s.prunePriorityRuntimeLocked(state, now)
 	s.priorityMu.Unlock()
 
-	s.refreshPriorityServerPings(ctx, state, now)
+	s.updatePriorityServerPings(ctx, state, now)
 	if ctx.Err() != nil {
 		return false
 	}
@@ -450,6 +450,23 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 	if previous.ActiveLocation != "" && previous.ActiveLocation != preferred {
 		initial = append(initial, previous.ActiveLocation)
 	}
+	if rapidPriorityChecks(state) {
+		for _, candidate := range candidates {
+			if len(initial) >= 3 {
+				break
+			}
+			seen := false
+			for _, location := range initial {
+				if location == candidate {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				initial = append(initial, candidate)
+			}
+		}
+	}
 	results := make(chan targetResult, len(initial))
 	for _, location := range initial {
 		go func(location string) {
@@ -559,6 +576,11 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 }
 
 func (s *Supervisor) priorityTargetProbe(ctx context.Context, state config.State, snapshot status.Snapshot, provider config.Provider, location string, previous priorityDecision) providerProbeResult {
+	if rapidPriorityChecks(state) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 1500*time.Millisecond)
+		defer cancel()
+	}
 	if previous.ActiveLocation == location {
 		key := provider.ID + "::" + strings.ToLower(strings.TrimSpace(location))
 		foundRuntime := false
@@ -591,6 +613,10 @@ func (s *Supervisor) priorityTargetProbe(ctx context.Context, state config.State
 		probe.Location = location
 	}
 	return probe
+}
+
+func rapidPriorityChecks(state config.State) bool {
+	return state.Automation.FailoverFailureSeconds > 0 && state.Automation.FailoverFailureSeconds <= 10
 }
 
 func (s *Supervisor) updatePriorityTargetHealth(policy config.PriorityPolicy, provider config.Provider, location string, probe providerProbeResult, now time.Time) providerHealthState {

@@ -1304,6 +1304,8 @@ func (h *Handler) handleProvider(w http.ResponseWriter, r *http.Request) {
 		switch action {
 		case "refresh":
 			h.handleProviderRefresh(w, r, id)
+		case "check":
+			h.handleProviderCandidatesCheck(w, r, id)
 		default:
 			writeError(w, http.StatusNotFound, fmt.Errorf("provider action %q not found", action))
 		}

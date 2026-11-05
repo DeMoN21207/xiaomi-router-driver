@@ -1,3 +1,4 @@
+import { findChartHit, tooltipLeft, trafficPointLabel as formatTrafficPointLabel } from "../chartGeometry.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { fetchJSON } from "../api.js";
@@ -963,23 +964,6 @@ function uniqueAxisLabels(labels) {
   });
 }
 
-function formatTrafficPointLabel(value, range) {
-  if (!value) return "";
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  const options = range === "30d"
-    ? { day: "2-digit", month: "short" }
-    : (range === "1h" || range === "3h")
-      ? { hour: "2-digit", minute: "2-digit" }
-      : { day: "2-digit", month: "short", hour: "2-digit" };
-
-  return new Intl.DateTimeFormat(undefined, options).format(date);
-}
-
 function formatTrafficSampleInterval(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return "-";
 
@@ -1165,38 +1149,19 @@ function ChartTooltip({ svgRef, points, range, renderContent, mode = "proximity"
     const svg = svgRef.current;
     if (!svg || !points || points.length === 0) return;
 
-    const rect = svg.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    const viewBoxWidth = svg.viewBox.baseVal.width || rect.width || 1;
-    const viewBoxHeight = svg.viewBox.baseVal.height || rect.height || 1;
-
-    let closest = null;
-    let closestDist = Infinity;
-    for (const point of points) {
-      const hits = point.hits?.length ? point.hits : [point];
-      for (const hit of hits) {
-        const pointX = (hit.x / viewBoxWidth) * rect.width;
-        const pointY = (hit.y / viewBoxHeight) * rect.height;
-        const dist = mode === "x"
-          ? Math.abs(pointX - mouseX)
-          : Math.hypot(pointX - mouseX, pointY - mouseY);
-        if (dist < closestDist) {
-          closestDist = dist;
-          closest = { point, x: pointX, y: pointY };
-        }
-      }
-    }
-
-    if (closest && (mode === "x" || mode === "bucket" || closestDist < threshold)) {
+    const closest = findChartHit(points, svg.getScreenCTM(), e.clientX, e.clientY, mode, threshold);
+    const parentRect = svg.parentElement.getBoundingClientRect();
+    if (closest) {
       setActive(closest.point.payload ?? closest.point);
-      setPos({ x: closest.x, y: closest.y });
+      setPos({ x: closest.x - parentRect.left, y: closest.y - parentRect.top });
     } else {
       setActive(null);
     }
   }, [svgRef, points, mode, threshold]);
 
   const handleLeave = useCallback(() => setActive(null), []);
+
+  useEffect(() => { setActive(null); }, [points, range]);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -1211,15 +1176,14 @@ function ChartTooltip({ svgRef, points, range, renderContent, mode = "proximity"
 
   if (!active) return null;
 
-  const tooltipWidth = 170;
   const parentWidth = svgRef.current?.parentElement?.offsetWidth || 400;
-  const isRight = pos.x > parentWidth / 2;
+  const tooltipWidth = Math.min(170, parentWidth);
 
   return (
     <div
       className="pointer-events-none absolute z-10 rounded-lg border border-outline-variant/20 bg-surface-container-highest/95 px-3 py-2 shadow-lg backdrop-blur-sm"
       style={{
-        left: isRight ? pos.x - tooltipWidth - 12 : pos.x + 12,
+        left: tooltipLeft(pos.x, parentWidth, tooltipWidth),
         top: Math.max(4, pos.y - 30),
         width: tooltipWidth,
       }}

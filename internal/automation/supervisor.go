@@ -46,6 +46,7 @@ type Supervisor struct {
 	probeCache   map[string]cachedProviderProbe
 
 	priorityEvalMu      sync.Mutex
+	priorityPingMu      sync.Mutex
 	failoverStatusCache atomic.Pointer[failoverStatusSnapshot]
 }
 

@@ -1366,8 +1366,8 @@ func normalizeAutomationSettings(settings AutomationSettings) AutomationSettings
 	if settings.FailoverFailureSeconds <= 0 {
 		settings.FailoverFailureSeconds = defaults.FailoverFailureSeconds
 	}
-	if settings.FailoverFailureSeconds < 15 {
-		settings.FailoverFailureSeconds = 15
+	if settings.FailoverFailureSeconds < 5 {
+		settings.FailoverFailureSeconds = 5
 	}
 	if settings.FailoverFailureSeconds > 3600 {
 		settings.FailoverFailureSeconds = 3600
