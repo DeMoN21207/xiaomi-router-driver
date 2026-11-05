@@ -23,7 +23,6 @@ const siteSearchDebounceMs = 300;
 
 export default function TrafficStatsPage() {
   const { t } = useI18n();
-  const initialLoadRef = useRef(true);
   const refreshAbortRef = useRef(null);
 
   const [siteData, setSiteData] = useState(null);
@@ -104,11 +103,12 @@ export default function TrafficStatsPage() {
     refreshAbortRef.current = controller;
     if (initial) {
       setLoading(true);
+      setDeviceHistoryData(null);
     }
 
     try {
       const fetchOptions = { signal: controller.signal, timeoutMs: 30_000 };
-      const [sitesResult, devicesResult, selectedDeviceResult, deviceHistoryResult] = await Promise.all([
+      const results = await Promise.allSettled([
         fetchJSON(buildSitesURL(), fetchOptions),
         fetchJSON(buildDevicesURL(), fetchOptions),
         selectedDeviceIp ? fetchJSON(buildSelectedDeviceURL(), fetchOptions) : Promise.resolve(null),
@@ -117,15 +117,18 @@ export default function TrafficStatsPage() {
       if (controller.signal.aborted) {
         return { ok: false, aborted: true };
       }
-      setSiteData(sitesResult);
-      setDeviceData(devicesResult);
-      setSelectedDeviceData(selectedDeviceResult);
-      setDeviceHistoryData(deviceHistoryResult);
-      setError("");
+      const setters = [setSiteData, setDeviceData, setSelectedDeviceData, setDeviceHistoryData];
+      for (let index = 0; index < results.length; index += 1) {
+        if (results[index].status === "fulfilled") setters[index](results[index].value);
+        else if (index === 0 || index >= 2) setters[index](null);
+      }
+      const failure = results.find(result => result.status === "rejected");
+      setError(failure?.reason?.message || "");
+      const sitesResult = results[0].status === "fulfilled" ? results[0].value : null;
       if (typeof sitesResult?.page === "number" && sitesResult.page > 0) {
         setSitePage((current) => (current === sitesResult.page ? current : sitesResult.page));
       }
-      return { ok: true };
+      return failure ? { ok: false, error: failure.reason } : { ok: true };
     } catch (err) {
       if (controller.signal.aborted || isAbortError(err)) {
         return { ok: false, aborted: true };
@@ -133,8 +136,9 @@ export default function TrafficStatsPage() {
       setError(err.message);
       return { ok: false, error: err };
     } finally {
-      if (initial && !controller.signal.aborted) {
+      if (!controller.signal.aborted && refreshAbortRef.current === controller) {
         setLoading(false);
+        refreshAbortRef.current = null;
       }
     }
   }, [buildDeviceHistoryURL, buildDevicesURL, buildSelectedDeviceURL, buildSitesURL, selectedDeviceIp]);
@@ -154,9 +158,7 @@ export default function TrafficStatsPage() {
   }, [refresh, showToast, t]);
 
   useEffect(() => {
-    const initial = initialLoadRef.current;
-    initialLoadRef.current = false;
-    void refresh(initial);
+    void refresh(true);
     return () => refreshAbortRef.current?.abort();
   }, [refresh]);
 
@@ -273,7 +275,7 @@ export default function TrafficStatsPage() {
     }
 
     const timerId = window.setInterval(() => {
-      if (document.visibilityState === "hidden") {
+      if (document.visibilityState === "hidden" || refreshAbortRef.current) {
         return;
       }
       void refresh(false);
@@ -562,7 +564,7 @@ export default function TrafficStatsPage() {
         </div>
 
         <div className="overflow-hidden rounded-2xl border border-outline-variant/10 bg-surface-container-low shadow-xl">
-          {loading && !siteData ? (
+          {loading ? (
             <div className="p-8 text-center text-sm text-on-surface-variant">...</div>
           ) : sites.length === 0 ? (
             <div className="p-8 text-center text-sm text-on-surface-variant">
@@ -1390,7 +1392,7 @@ function SortableTh({ sortKey, current, dir, onSort, children, align = "left", c
   const textAlign = align === "right" ? "text-right" : "text-left";
   const arrow = isActive && dir === "asc" ? "▲" : "▼";
   return (
-    <th className={`px-5 py-3 ${textAlign} text-[10px] font-bold uppercase tracking-widest text-on-surface-variant ${className}`}>
+    <th aria-sort={isActive ? dir === "asc" ? "ascending" : "descending" : "none"} className={`px-5 py-3 ${textAlign} text-[10px] font-bold uppercase tracking-widest text-on-surface-variant ${className}`}>
       <button
         type="button"
         onClick={() => onSort(sortKey)}

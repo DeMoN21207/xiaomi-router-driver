@@ -248,6 +248,23 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("level must be info, warn, or error"))
 		return
 	}
+	if r.URL.Query().Get("pagination") == "cursor" {
+		if offset != 0 {
+			writeError(w, http.StatusBadRequest, errors.New("offset cannot be combined with cursor pagination"))
+			return
+		}
+		page, err := h.events.ListPageByLevel(level, limit, r.URL.Query().Get("cursor"))
+		if err != nil {
+			code := http.StatusInternalServerError
+			if errors.Is(err, events.ErrInvalidCursor) {
+				code = http.StatusBadRequest
+			}
+			writeError(w, code, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": page.Events, "count": len(page.Events), "total": page.Total, "level": level, "levelCounts": page.LevelCounts, "nextCursor": page.NextCursor, "hasMore": page.NextCursor != ""})
+		return
+	}
 
 	list, total, err := h.events.ListByLevel(level, limit, offset)
 	if err != nil {

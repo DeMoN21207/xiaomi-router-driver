@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { fetchJSON } from "../api.js";
 import { eventMessage } from "../eventMessage.js";
 import { useI18n } from "../i18n.jsx";
@@ -19,6 +19,12 @@ export default function EventsPage() {
   const [clearing, setClearing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [error, setError] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const requestRef = useRef(null);
+  const cursorRef = useRef("");
+  const offsetRef = useRef(0);
+  const clearingRef = useRef(false);
+  const datasetFilterRef = useRef("");
 
   const levelFilters = useMemo(
     () => [
@@ -30,11 +36,13 @@ export default function EventsPage() {
     [t],
   );
 
-  const eventsURL = useCallback((offset = 0) => {
+  const eventsURL = useCallback((offset = 0, cursor = "") => {
     const params = new URLSearchParams({
       limit: String(PAGE_SIZE),
-      offset: String(offset),
+      pagination: "cursor",
     });
+    if (cursor) params.set("cursor", cursor);
+    else if (offset) { params.delete("pagination"); params.set("offset", String(offset)); }
     if (filter) {
       params.set("level", filter);
     }
@@ -42,56 +50,92 @@ export default function EventsPage() {
   }, [filter]);
 
   const refresh = useCallback(async () => {
+    if (clearingRef.current) return;
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    if (datasetFilterRef.current !== filter) {
+      datasetFilterRef.current = filter;
+      setEvents([]);
+      setTotal(0);
+      setHasMore(false);
+      cursorRef.current = "";
+      offsetRef.current = 0;
+    }
     setLoading(true);
+    setLoadingMore(false);
     try {
-      const data = await fetchJSON(eventsURL(0));
+      const data = await fetchJSON(eventsURL(0), { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setEvents(data.events || []);
       setTotal(data.total || 0);
       setLevelCounts(data.levelCounts || { info: 0, warn: 0, error: 0 });
       setError("");
+      cursorRef.current = data.nextCursor || "";
+      offsetRef.current = data.events?.length || 0;
+      setHasMore(data.hasMore ?? offsetRef.current < data.total);
     } catch (err) {
-      setError(err.message);
+      if (!controller.signal.aborted) setError(err.message);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted && requestRef.current === controller) { setLoading(false); requestRef.current = null; }
     }
-  }, [eventsURL]);
+  }, [eventsURL, filter]);
 
   useEffect(() => {
     void refresh();
+    return () => requestRef.current?.abort();
   }, [refresh]);
 
   async function loadMore() {
+    if (requestRef.current || clearingRef.current) return;
+    const controller = new AbortController();
+    requestRef.current = controller;
     setLoadingMore(true);
     try {
-      const data = await fetchJSON(eventsURL(events.length));
+      const data = await fetchJSON(eventsURL(offsetRef.current, cursorRef.current), { signal: controller.signal });
+      if (controller.signal.aborted) return;
       const newEvents = data.events || [];
-      setEvents((prev) => [...prev, ...newEvents]);
+      setEvents((prev) => {
+        const ids = new Set(prev.map(event => event.id));
+        return [...prev, ...newEvents.filter(event => !ids.has(event.id))];
+      });
       setTotal(data.total || 0);
       setLevelCounts(data.levelCounts || { info: 0, warn: 0, error: 0 });
       setError("");
+      cursorRef.current = data.nextCursor || "";
+      offsetRef.current += newEvents.length;
+      setHasMore(data.hasMore ?? offsetRef.current < data.total);
     } catch (err) {
-      setError(err.message);
+      if (!controller.signal.aborted) setError(err.message);
     } finally {
-      setLoadingMore(false);
+      if (!controller.signal.aborted && requestRef.current === controller) { setLoadingMore(false); requestRef.current = null; }
     }
   }
 
   async function clearAll() {
+    if (clearingRef.current) return;
+    clearingRef.current = true;
+    requestRef.current?.abort();
+    requestRef.current = null;
     setClearing(true);
+    setLoading(false);
+    setLoadingMore(false);
     try {
       await fetchJSON("/api/events", { method: "DELETE" });
       setEvents([]);
       setTotal(0);
       setLevelCounts({ info: 0, warn: 0, error: 0 });
       setError("");
+      setHasMore(false);
+      cursorRef.current = "";
+      offsetRef.current = 0;
     } catch (err) {
       setError(err.message);
     } finally {
       setClearing(false);
+      clearingRef.current = false;
     }
   }
-
-  const hasMore = events.length < total;
 
   return (
     <div className="space-y-8">
@@ -144,6 +188,7 @@ export default function EventsPage() {
           <button
             type="button"
             onClick={refresh}
+            disabled={loading || clearing}
             className="flex items-center gap-2 rounded-lg border border-primary/20 px-4 py-2 text-xs font-bold uppercase tracking-wider text-primary transition-colors duration-100 hover:bg-primary/5 hover:text-on-surface active:scale-95"
           >
             <Icon name="refresh" className="h-4 w-4" />
@@ -170,6 +215,7 @@ export default function EventsPage() {
               key={item.value}
               type="button"
               onClick={() => setFilter(item.value)}
+              disabled={clearing}
               className={`rounded-xl p-4 text-left transition-colors ${
                 isActive ? `border ${c.active}` : "border border-transparent bg-surface-container-low hover:bg-surface-container"
               }`}
@@ -188,10 +234,10 @@ export default function EventsPage() {
       </div>
 
       <div className="space-y-3">
-        {events.length === 0 ? (
+        {loading ? <p className="p-6 text-sm text-on-surface-variant">{t("events.loading")}</p> : events.length === 0 ? (
           <div className="rounded-xl bg-surface-container-low p-12 text-center">
             <Icon name="history" className="mx-auto mb-3 h-12 w-12 text-outline-variant" />
-            <p className="text-on-surface-variant">{filter ? t("events.emptyFiltered") : t("events.empty")}</p>
+            <p className="text-on-surface-variant">{error ? t("error.events") : filter ? t("events.emptyFiltered") : t("events.empty")}</p>
           </div>
         ) : (
           events.map((event) => {
@@ -219,7 +265,7 @@ export default function EventsPage() {
           <button
             type="button"
             onClick={loadMore}
-            disabled={loadingMore}
+            disabled={loading || loadingMore || clearing}
             className="flex w-full items-center justify-center gap-2 rounded-xl border border-outline-variant/20 bg-surface-container-low py-4 text-sm font-medium text-primary transition-colors hover:bg-surface-container disabled:opacity-50"
           >
             {loadingMore ? (
@@ -235,6 +281,7 @@ export default function EventsPage() {
             )}
           </button>
         )}
+        {!loading && !hasMore && events.length > 0 && events.length < total && <p className="text-sm text-on-surface-variant">{t("events.changedRefresh")}</p>}
       </div>
     </div>
   );
