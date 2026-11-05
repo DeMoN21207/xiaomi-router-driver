@@ -9,6 +9,6 @@
 - [x] Separate catalogue, domain editor, and automatic selection editor with explicit section controls.
 - [x] Replace native disclosures and keep each editor's actions with its fields; preserve policy scope when editing.
 - [x] Verify desktop/mobile section visibility and switching with a synthetic API; run frontend tests/build and Go checks for embedded UI.
-- [ ] Review, integrate into main, deploy with rollback, and verify configuration fingerprint and actual Wi-Fi traffic.
+- [x] Review, integrate into main, deploy with rollback, and verify configuration fingerprint and actual Wi-Fi traffic.
 
 Review focus: independent DeepSeek decisions, synthetic shared policy identity, fixed routes not falsely shown as runtime-confirmed, switching errors and draft retention, disabled subscriptions, empty membership, and accessible controls.
