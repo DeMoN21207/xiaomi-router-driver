@@ -10,4 +10,6 @@ Selection remains configurable per policy: configured order or lower ping. Prese
 - [x] Add selection mode and stable latency ranking with tests for health, unknown/stale pings, manual/scheduled choices, and jitter.
 - [x] Show ping in current routing, server choices, and automatic-selection settings; expose selection mode.
 - [x] Verify UI with synthetic data, full Go/frontend checks, and independent review.
-- [ ] Deploy with rollback, enable the requested mode, verify actual router ping/status, Wi-Fi, and push to main.
+- [x] Deploy with rollback, enable the requested mode, and verify actual router ping/status and Wi-Fi.
+
+Source integrated into `main` as `9ee7bce`; the packaged binary and deployment evidence accompany it. See ../../2026-11-05-server-ping.md for verification results.
