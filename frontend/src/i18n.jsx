@@ -1302,7 +1302,7 @@ Object.assign(translations.en, {
 
 Object.assign(translations.ru, {
   "trafficStats.historyTitle": "Активность устройства",
-  "trafficStats.historySubtitle": "Срез по времени для выбранного устройства: видно, сколько трафика идет сейчас, что шло через туннель и что уходило напрямую.",
+  "trafficStats.historySubtitle": "Трафик выбранного устройства за период: через VPN, напрямую и средняя скорость за весь период.",
   "trafficStats.historyRangeTotal": "За период",
   "trafficStats.historyTunneled": "Через туннель",
   "trafficStats.historyDirect": "Напрямую",
@@ -1316,7 +1316,7 @@ Object.assign(translations.ru, {
 
 Object.assign(translations.en, {
   "trafficStats.historyTitle": "Device activity",
-  "trafficStats.historySubtitle": "Time-sliced view for the selected device, including current traffic, tunneled traffic, and direct traffic.",
+  "trafficStats.historySubtitle": "Selected device traffic over the period: VPN, direct traffic, and average speed across the entire period.",
   "trafficStats.historyRangeTotal": "In range",
   "trafficStats.historyTunneled": "Tunneled",
   "trafficStats.historyDirect": "Direct",
@@ -1443,7 +1443,7 @@ Object.assign(translations.ru, {
   "settings.failoverFailureSeconds": "Считать канал плохим через, сек",
   "settings.failoverRestoreSeconds": "Вернуть основной через, сек",
   "hint.providerFailover": "Если активный VPN-провайдер упал, маршруты временно переводятся на следующий включённый провайдер. Основной проверяется в фоне и возвращается автоматически.",
-  "hint.failoverFailureSeconds": "Сколько секунд подтверждать отказ перед переключением на рабочий резерв. Минимум 5. Порог 6 секунд включает быстрые проверки и предварительную проверку резервов; применение маршрута занимает дополнительное время.",
+  "hint.failoverFailureSeconds": "Сколько секунд подтверждать отказ перед переключением на рабочий резерв. Минимум 5. При пороге 5–10 секунд включены быстрые проверки и предварительная проверка резервов. Применение маршрута занимает дополнительное время.",
   "hint.failoverRestoreSeconds": "Сколько секунд основной провайдер должен быть снова доступен перед автоматическим возвратом маршрутов. Минимум 10.",
   "kind.automation.provider_unhealthy": "Провайдер нестабилен",
   "kind.automation.provider_failed_over": "Маршруты переключены на резерв",
@@ -1466,7 +1466,7 @@ Object.assign(translations.en, {
   "settings.failoverFailureSeconds": "Mark channel bad after, sec",
   "settings.failoverRestoreSeconds": "Restore primary after, sec",
   "hint.providerFailover": "If the active VPN provider is down, routes are temporarily moved to the next enabled provider. The primary provider is checked in the background and restored automatically.",
-  "hint.failoverFailureSeconds": "How long to confirm an outage before choosing a working fallback. Minimum 5 seconds. A 6-second window enables rapid checks and checks reserves ahead of failure; applying the route takes additional time.",
+  "hint.failoverFailureSeconds": "How long to confirm an outage before choosing a working fallback. Minimum 5 seconds. Windows of 5–10 seconds enable rapid checks and pre-check reserves. Applying the route takes additional time.",
   "hint.failoverRestoreSeconds": "How long the primary provider must be reachable again before routes are automatically restored. Minimum 10 seconds.",
   "kind.automation.provider_unhealthy": "Provider unstable",
   "kind.automation.provider_failed_over": "Routes switched to fallback",
