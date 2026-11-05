@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON } from "../api.js";
+import { Link } from "react-router-dom";
 import { readDashboardRefreshInterval } from "../dashboardPreferences.js";
 import { useI18n } from "../i18n.jsx";
 import Icon from "../components/Icon.jsx";
@@ -350,6 +351,7 @@ export default function TrafficStatsPage() {
       ?? null
     : null;
   const selectedDeviceHistory = selectedDeviceIp ? deviceHistoryData : null;
+  const collection = siteData?.collection;
 
   const summaryCards = selectedDeviceIp
     ? [
@@ -399,9 +401,10 @@ export default function TrafficStatsPage() {
           <p className="mt-1 text-on-surface-variant">{t("trafficStats.subtitle")}</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          {collection?.enabled && <span className="text-xs text-on-surface-variant">{t("trafficStats.collectionInterval", { interval: formatAutoRefreshInterval(collection.intervalSeconds * 1000, t) })}</span>}
           <span className="rounded-full border border-outline-variant/20 bg-surface-container px-3 py-1.5 text-[11px] font-bold uppercase tracking-widest text-outline">
             {autoRefreshMs > 0
-              ? t("dashboard.autoRefresh", { interval: formatAutoRefreshInterval(autoRefreshMs, t) })
+              ? t("trafficStats.displayRefresh", { interval: formatAutoRefreshInterval(autoRefreshMs, t) })
               : t("dashboard.autoRefreshDisabled")}
           </span>
           <button
@@ -434,7 +437,11 @@ export default function TrafficStatsPage() {
         </div>
       </div>
 
-      {error ? <InlineNotice tone="error" title={t("error.dashboard")} message={error} /> : null}
+      {error ? <InlineNotice tone="error" title={t("trafficStats.loadError")} message={error} /> : null}
+      {collection?.enabled === false && <div className="space-y-2">
+        <InlineNotice tone="warn" title={t("trafficStats.collectionDisabled")} message={t("trafficStats.collectionDisabledHelp")} />
+        <Link to="/settings" className="inline-block rounded-lg px-3 py-2 text-sm font-medium text-primary hover:bg-primary/10">{t("trafficStats.collectionSettings")}</Link>
+      </div>}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {summaryCards.map((card) => (
@@ -559,7 +566,7 @@ export default function TrafficStatsPage() {
             <div className="p-8 text-center text-sm text-on-surface-variant">...</div>
           ) : sites.length === 0 ? (
             <div className="p-8 text-center text-sm text-on-surface-variant">
-              {debouncedSiteSearch || selectedDeviceIp ? t("trafficStats.noResults") : t("trafficStats.empty")}
+              {error ? t("trafficStats.loadError") : debouncedSiteSearch || selectedDeviceIp || siteScope ? t("trafficStats.noResults") : collection?.enabled === false ? t("trafficStats.collectionDisabled") : t("trafficStats.empty")}
             </div>
           ) : (
             <>

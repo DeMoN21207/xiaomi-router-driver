@@ -167,7 +167,11 @@ func (s *Supervisor) failoverAppliedState(state config.State) config.State {
 
 func (s *Supervisor) failoverAppliedStateLocked(state config.State) config.State {
 	s.failover.ensure()
-	if len(s.failover.overrides) == 0 {
+	return applyFailoverOverrides(state, s.failover.overrides)
+}
+
+func applyFailoverOverrides(state config.State, overrides map[string]failoverOverride) config.State {
+	if len(overrides) == 0 {
 		return state
 	}
 
@@ -176,7 +180,7 @@ func (s *Supervisor) failoverAppliedStateLocked(state config.State) config.State
 	providersByID := providersIndex(state.Providers)
 
 	for index := range out.Rules {
-		override, ok := s.failover.overrides[out.Rules[index].ID]
+		override, ok := overrides[out.Rules[index].ID]
 		if !ok {
 			continue
 		}

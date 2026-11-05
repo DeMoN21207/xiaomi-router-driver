@@ -158,6 +158,7 @@ func main() {
 	})
 	supervisor := automation.NewSupervisor(stateManager, statusService, apiHandler.ApplyCurrentRules, apiHandler.ApplyRulesFromState, recordEvent, paths.DataDir)
 	statusService.SetSharedDomainLocation(supervisor.SharedDomainLocation)
+	statusService.SetTrafficRules(supervisor.TrafficRules)
 	apiHandler.SetFailoverStatusProvider(supervisor.FailoverStatus)
 	apiHandler.SetPriorityRuntime(supervisor.PriorityStatus, supervisor.SetPriorityOverride, supervisor.ClearPriorityOverride, supervisor.ApplyPriorityPolicies)
 	var workers sync.WaitGroup

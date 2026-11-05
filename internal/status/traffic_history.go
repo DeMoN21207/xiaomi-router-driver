@@ -213,6 +213,7 @@ func (s *Service) TrafficRoutes() ([]TrafficRoute, error) {
 	if err != nil {
 		return nil, err
 	}
+	state = s.trafficState(state)
 
 	_, _, domainsByProvider := summarizeEnabledRules(state)
 	openvpnRuntime := []openvpn.RuntimeSnapshot{}

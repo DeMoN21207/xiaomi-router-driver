@@ -49,14 +49,20 @@ type SiteTrafficStat struct {
 }
 
 type SiteTrafficResponse struct {
-	Sites      []SiteTrafficStat `json:"sites"`
-	TotalBytes uint64            `json:"totalBytes"`
-	UpdatedAt  string            `json:"updatedAt"`
-	Page       int               `json:"page"`
-	PageSize   int               `json:"pageSize"`
-	Total      int               `json:"total"`
-	TotalPages int               `json:"totalPages"`
-	SourceIP   string            `json:"sourceIp,omitempty"`
+	Sites      []SiteTrafficStat        `json:"sites"`
+	TotalBytes uint64                   `json:"totalBytes"`
+	UpdatedAt  string                   `json:"updatedAt"`
+	Page       int                      `json:"page"`
+	PageSize   int                      `json:"pageSize"`
+	Total      int                      `json:"total"`
+	TotalPages int                      `json:"totalPages"`
+	SourceIP   string                   `json:"sourceIp,omitempty"`
+	Collection *TrafficCollectionStatus `json:"collection,omitempty"`
+}
+
+type TrafficCollectionStatus struct {
+	Enabled         bool  `json:"enabled"`
+	IntervalSeconds int64 `json:"intervalSeconds"`
 }
 
 type DeviceTrafficSiteStat struct {
@@ -176,10 +182,9 @@ func (s *Service) RunSiteTrafficSampler(ctx context.Context) {
 	for {
 		interval := s.effectiveSiteTrafficSampleInterval()
 		if interval <= 0 {
-			if enabled {
-				if err := disableDNSObserverConfig(); err != nil {
-					log.Printf("site traffic sampler observer cleanup failed: %v", err)
-				}
+			if err := disableDNSObserverConfig(); err != nil {
+				log.Printf("site traffic sampler observer cleanup failed: %v", err)
+			} else {
 				enabled = false
 			}
 			select {
@@ -225,6 +230,7 @@ func (s *Service) SampleSiteTraffic() error {
 	if err != nil {
 		return err
 	}
+	state = s.trafficState(state)
 
 	observedIPs, err := s.siteTraffic.ObservedIPs()
 	if err != nil {
@@ -257,6 +263,7 @@ func (s *Service) SiteTraffic(scope string, sortBy string, order string, sourceI
 			Total:      0,
 			TotalPages: 0,
 			SourceIP:   strings.TrimSpace(sourceIP),
+			Collection: &TrafficCollectionStatus{},
 		}, nil
 	}
 
@@ -264,6 +271,7 @@ func (s *Service) SiteTraffic(scope string, sortBy string, order string, sourceI
 	if err != nil {
 		return SiteTrafficResponse{}, err
 	}
+	interval := s.effectiveSiteTrafficSampleInterval()
 
 	return SiteTrafficResponse{
 		Sites:      result.Stats,
@@ -274,6 +282,7 @@ func (s *Service) SiteTraffic(scope string, sortBy string, order string, sourceI
 		Total:      result.TotalCount,
 		TotalPages: totalTrafficPages(result.TotalCount, pageSize),
 		SourceIP:   strings.TrimSpace(sourceIP),
+		Collection: &TrafficCollectionStatus{Enabled: interval > 0, IntervalSeconds: int64(interval / time.Second)},
 	}, nil
 }
 
@@ -529,38 +538,84 @@ func normalizeObservedDomain(raw string) string {
 	}
 }
 
+var dnsObserverConfigMu sync.Mutex
+
+func syncDNSObserverConfig(configPath, logPath string, restart func() error) error {
+	desired := strings.Join([]string{"log-queries=extra", fmt.Sprintf("log-async=%d", dnsObserverLogAsyncLines), "log-facility=" + logPath, ""}, "\n")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("prepare dns observer config dir: %w", err)
+	}
+	existing, err := os.ReadFile(configPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read dns observer config: %w", err)
+	}
+	existed := err == nil
+	changed := !existed || string(existing) != desired
+	if !changed {
+		if _, err := os.Stat(logPath); err == nil {
+			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if changed {
+		if err := fileutil.WriteFileAtomic(configPath, []byte(desired), 0o644); err != nil {
+			return fmt.Errorf("write dns observer config: %w", err)
+		}
+	}
+	if err := restart(); err != nil {
+		if !changed {
+			return errors.Join(err, restart())
+		}
+		var restoreErr error
+		if existed {
+			restoreErr = fileutil.WriteFileAtomic(configPath, existing, 0o644)
+		} else {
+			restoreErr = os.Remove(configPath)
+		}
+		if restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restore dns observer config: %w", restoreErr))
+		}
+		return errors.Join(err, restart())
+	}
+	return nil
+}
+
+func restartDNSObserver(script string) error {
+	if _, err := os.Stat(script); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	// dnsmasq does not re-read log-facility or log-queries on SIGHUP/reload.
+	output, err := exec.CommandContext(ctx, script, "restart").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("restart dnsmasq for observer config: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 func ensureDNSObserverConfig() error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
 
-	desired := strings.Join([]string{
-		"log-queries=extra",
-		fmt.Sprintf("log-async=%d", dnsObserverLogAsyncLines),
-		"log-facility=" + dnsObserverLogPath,
-		"",
-	}, "\n")
-
-	if err := os.MkdirAll(filepath.Dir(dnsObserverConfigPath), 0o755); err != nil {
-		return fmt.Errorf("prepare dns observer config dir: %w", err)
-	}
-
-	existing, err := os.ReadFile(dnsObserverConfigPath)
-	if err == nil && string(existing) == desired {
-		return nil
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read dns observer config: %w", err)
-	}
-
-	if err := fileutil.WriteFileAtomic(dnsObserverConfigPath, []byte(desired), 0o644); err != nil {
-		return fmt.Errorf("write dns observer config: %w", err)
-	}
-
-	return reloadDNSObserver()
+	dnsObserverConfigMu.Lock()
+	defer dnsObserverConfigMu.Unlock()
+	return syncDNSObserverConfig(dnsObserverConfigPath, dnsObserverLogPath, reloadDNSObserver)
 }
 
 func disableDNSObserverConfig() error {
+	dnsObserverConfigMu.Lock()
+	defer dnsObserverConfigMu.Unlock()
+	previous, err := os.ReadFile(dnsObserverConfigPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
 	if err := os.Remove(dnsObserverConfigPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -568,48 +623,17 @@ func disableDNSObserverConfig() error {
 		return fmt.Errorf("remove dns observer config: %w", err)
 	}
 
-	return reloadDNSObserver()
+	if err := reloadDNSObserver(); err != nil {
+		if restoreErr := fileutil.WriteFileAtomic(dnsObserverConfigPath, previous, 0o644); restoreErr != nil {
+			return errors.Join(err, restoreErr)
+		}
+		return errors.Join(err, reloadDNSObserver())
+	}
+	return nil
 }
 
 func reloadDNSObserver() error {
-	if _, err := os.Stat("/etc/init.d/dnsmasq"); err == nil {
-		cmd := exec.Command("/etc/init.d/dnsmasq", "reload")
-		output, reloadErr := cmd.CombinedOutput()
-		if reloadErr == nil {
-			return nil
-		}
-
-		if pidof, err := exec.LookPath("pidof"); err == nil {
-			pidsOutput, pidErr := exec.Command(pidof, "dnsmasq").CombinedOutput()
-			if pidErr == nil {
-				pids := strings.Fields(strings.TrimSpace(string(pidsOutput)))
-				if len(pids) > 0 {
-					hup := exec.Command("kill", append([]string{"-HUP"}, pids...)...)
-					if hupOutput, hupErr := hup.CombinedOutput(); hupErr == nil {
-						return nil
-					} else if strings.TrimSpace(string(hupOutput)) != "" {
-						output = append(output, '\n')
-						output = append(output, hupOutput...)
-					}
-				}
-			}
-		}
-
-		cmd = exec.Command("/etc/init.d/dnsmasq", "restart")
-		restartOutput, restartErr := cmd.CombinedOutput()
-		if restartErr == nil {
-			return nil
-		}
-		if strings.TrimSpace(string(restartOutput)) != "" {
-			output = append(output, '\n')
-			output = append(output, restartOutput...)
-		}
-		return fmt.Errorf("reload dnsmasq for observer config: %s", strings.TrimSpace(string(output)))
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("check dnsmasq init script: %w", err)
-	}
-
-	return nil
+	return restartDNSObserver("/etc/init.d/dnsmasq")
 }
 
 func resolveDeviceIdentities() (map[string]deviceIdentity, error) {

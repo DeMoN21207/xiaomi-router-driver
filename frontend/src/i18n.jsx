@@ -1204,6 +1204,12 @@ const I18nContext = createContext(null);
 
 Object.assign(translations.ru, {
   "trafficStats.title": "Статистика сайтов",
+  "trafficStats.collectionInterval": "Сбор данных: каждые {interval}",
+  "trafficStats.displayRefresh": "Обновление экрана: {interval}",
+  "trafficStats.collectionDisabled": "Автоматический сбор отключён",
+  "trafficStats.collectionDisabledHelp": "Сохранённая статистика показана ниже. Новые данные собираются только по кнопке «Собрать сейчас». Проверьте профиль нагрузки в настройках.",
+  "trafficStats.collectionSettings": "Настройки сбора",
+  "trafficStats.loadError": "Не удалось загрузить статистику трафика",
   "trafficStats.subtitle": "Трафик по всем наблюдаемым сайтам. Для маршрутов через VPN отдельно показывается, какой туннель их обслуживает.",
   "trafficStats.sitesTracked": "Сайтов",
   "trafficStats.searchPlaceholder": "Поиск сайта или домена...",
@@ -1221,6 +1227,12 @@ Object.assign(translations.ru, {
 
 Object.assign(translations.en, {
   "trafficStats.title": "Site Traffic",
+  "trafficStats.collectionInterval": "Collection: every {interval}",
+  "trafficStats.displayRefresh": "Display refresh: {interval}",
+  "trafficStats.collectionDisabled": "Automatic collection is disabled",
+  "trafficStats.collectionDisabledHelp": "Saved statistics are shown below. New data is collected only with “Collect now”. Check the load profile in settings.",
+  "trafficStats.collectionSettings": "Collection settings",
+  "trafficStats.loadError": "Unable to load traffic statistics",
   "trafficStats.subtitle": "Traffic for all observed sites. VPN-routed entries are marked with the tunnel that handled them.",
   "trafficStats.sitesTracked": "Sites",
   "trafficStats.devicesTracked": "Devices",

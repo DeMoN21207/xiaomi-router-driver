@@ -2,6 +2,18 @@ package automation
 
 import "xiomi-router-driver/internal/config"
 
+func (s *Supervisor) TrafficRules(state config.State) []config.Rule {
+	state = s.priorityAppliedState(state)
+	var overrides map[string]failoverOverride
+	if s.failoverMu.TryRLock() {
+		overrides = cloneOverrides(s.failover.overrides)
+		s.failoverMu.RUnlock()
+	} else if snapshot := s.failoverStatusCache.Load(); snapshot != nil {
+		overrides = snapshot.overrides
+	}
+	return applyFailoverOverrides(state, overrides).EffectiveRules()
+}
+
 func sharedDomainRoutingState(state config.State) config.State {
 	routes := state.SharedDomainRoutes()
 	if len(routes) == 0 || len(state.SharedDomains.Entries) == 0 {

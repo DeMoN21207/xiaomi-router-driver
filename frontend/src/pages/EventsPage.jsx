@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { fetchJSON } from "../api.js";
+import { eventMessage } from "../eventMessage.js";
 import { useI18n } from "../i18n.jsx";
 import Icon from "../components/Icon.jsx";
 import InlineNotice from "../components/InlineNotice.jsx";
@@ -163,7 +164,7 @@ export default function EventsPage() {
             error: { active: "border-error/30 bg-error/10", icon: "text-error", text: "text-error" },
           };
           const c = colorMap[item.color];
-          const count = item.value === "" ? total : levelCounts[item.value] ?? 0;
+          const count = item.value === "" ? (levelCounts.info ?? 0) + (levelCounts.warn ?? 0) + (levelCounts.error ?? 0) : levelCounts[item.value] ?? 0;
           return (
             <button
               key={item.value}
@@ -208,7 +209,7 @@ export default function EventsPage() {
                   </div>
                   <span className="font-mono text-xs text-outline">{formatDateFull(event.occurredAt)}</span>
                 </div>
-                <p className="ml-9 text-sm text-on-surface-variant">{event.message}</p>
+                <p className="whitespace-pre-wrap break-words text-sm text-on-surface-variant sm:ml-9 [overflow-wrap:anywhere]">{eventMessage(event.message)}</p>
               </div>
             );
           })

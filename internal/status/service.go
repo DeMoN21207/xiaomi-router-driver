@@ -128,6 +128,22 @@ type Service struct {
 	siteTrafficSampleInterval   time.Duration
 	dnsProxyHealth              func() dnsproxy.Health
 	sharedDomainLocation        func() string
+	trafficRules                func(config.State) []config.Rule
+}
+
+// SetTrafficRules is wired once before the sampler workers start. The provider
+// returns a snapshot of completed routing decisions without network work.
+func (s *Service) SetTrafficRules(provider func(config.State) []config.Rule) {
+	s.trafficRules = provider
+}
+
+func (s *Service) trafficState(state config.State) config.State {
+	if s.trafficRules != nil {
+		state.Rules = s.trafficRules(state)
+	} else {
+		state.Rules = s.effectiveRules(state)
+	}
+	return state
 }
 
 func (s *Service) SetSharedDomainLocation(provider func() string) {
