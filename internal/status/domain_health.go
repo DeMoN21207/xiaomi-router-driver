@@ -323,7 +323,7 @@ func (s *Service) resolveDomainHealthAssignments(targets []string) (map[string]d
 		return nil, err
 	}
 
-	for _, rule := range state.Rules {
+	for _, rule := range s.effectiveRules(state) {
 		if !rule.Enabled {
 			continue
 		}

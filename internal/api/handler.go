@@ -95,6 +95,7 @@ type ruleRequest struct {
 type priorityPolicyRequest struct {
 	Name       string                          `json:"name"`
 	ProviderID string                          `json:"providerId"`
+	RuleID     *string                         `json:"ruleId"`
 	Enabled    bool                            `json:"enabled"`
 	Entries    []string                        `json:"entries"`
 	Targets    []config.PriorityTarget         `json:"targets"`
@@ -151,6 +152,7 @@ func NewHandler(deps Dependencies) *Handler {
 	mux.HandleFunc("/api/traffic/devices/history", handler.handleDeviceTrafficHistory)
 	mux.HandleFunc("/api/traffic/devices", handler.handleDeviceTraffic)
 	mux.HandleFunc("/api/config", handler.handleConfig)
+	mux.HandleFunc("/api/config/shared-domains", handler.handleSharedDomains)
 	mux.HandleFunc("/api/config/routing", handler.handleRoutingConfig)
 	mux.HandleFunc("/api/config/automation", handler.handleAutomationConfig)
 	mux.HandleFunc("/api/priority-policies/status", handler.handlePriorityPolicyStatus)
@@ -2114,6 +2116,18 @@ func (h *Handler) buildPriorityPolicy(ctx context.Context, id string, req priori
 	if provider.Type != config.ProviderTypeSubscription {
 		return config.PriorityPolicy{}, errors.New("priority policies are supported only for subscription providers")
 	}
+	var ruleID string
+	if req.RuleID != nil {
+		ruleID = strings.TrimSpace(*req.RuleID)
+	} else if previous, exists := findPriorityPolicy(state.PriorityPolicies, id); exists {
+		ruleID = previous.RuleID
+	}
+	if ruleID != "" {
+		index := findRuleIndex(state.Rules, ruleID)
+		if index < 0 || state.Rules[index].ProviderID != providerID {
+			return config.PriorityPolicy{}, errors.New("priority policy route must belong to the selected provider")
+		}
+	}
 
 	targets := normalizePriorityRequestTargets(req.Targets)
 	if len(targets) == 0 {
@@ -2136,6 +2150,7 @@ func (h *Handler) buildPriorityPolicy(ctx context.Context, id string, req priori
 	return config.PriorityPolicy{
 		ID:         id,
 		ProviderID: providerID,
+		RuleID:     ruleID,
 		Name:       name,
 		Enabled:    req.Enabled,
 		Entries:    nil,
@@ -2413,11 +2428,14 @@ func validateProviderActivation(candidate config.Provider, providers []config.Pr
 }
 
 func validateActiveRuleEntries(state config.State) error {
+	if err := validateSharedDomainRoutes(state); err != nil {
+		return err
+	}
 	providersByID := providersIndex(state.Providers)
 	seen := make(map[string]activeRuleOwner)
 	ipRanges := make([]activeIPRange, 0, 8)
 
-	for _, rule := range state.Rules {
+	for _, rule := range state.EffectiveRules() {
 		if !rule.Enabled {
 			continue
 		}
@@ -2441,7 +2459,7 @@ func validateActiveRuleEntries(state config.State) error {
 
 func validatePriorityPolicyState(state config.State) error {
 	providersByID := providersIndex(state.Providers)
-	enabledByProvider := make(map[string]config.PriorityPolicy)
+	enabledByProvider := make(map[string][]config.PriorityPolicy)
 	for _, policy := range state.PriorityPolicies {
 		if !policy.Enabled {
 			continue
@@ -2450,14 +2468,20 @@ func validatePriorityPolicyState(state config.State) error {
 		if providerID == "" {
 			continue
 		}
-		if previous, exists := enabledByProvider[providerID]; exists {
+		for _, previous := range enabledByProvider[providerID] {
+			if policy.RuleID != "" && previous.RuleID != "" && policy.RuleID != previous.RuleID {
+				continue
+			}
 			providerName := providerID
 			if provider, ok := providersByID[providerID]; ok && strings.TrimSpace(provider.Name) != "" {
 				providerName = provider.Name
 			}
+			if policy.RuleID != "" && policy.RuleID == previous.RuleID {
+				return fmt.Errorf("only one enabled priority policy is allowed for route %q: %q and %q", policy.RuleID, previous.Name, policy.Name)
+			}
 			return fmt.Errorf("only one enabled priority policy is allowed for provider %q: %q and %q", providerName, previous.Name, policy.Name)
 		}
-		enabledByProvider[providerID] = policy
+		enabledByProvider[providerID] = append(enabledByProvider[providerID], policy)
 	}
 	return nil
 }

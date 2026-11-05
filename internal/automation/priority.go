@@ -158,6 +158,7 @@ func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state conf
 	if s.applyState == nil || snapshot.WAN.State != "up" || ctx.Err() != nil {
 		return false
 	}
+	state = sharedDomainRoutingState(state)
 
 	now := time.Now()
 	s.priorityMu.Lock()
@@ -209,14 +210,22 @@ func (s *Supervisor) priorityAppliedState(state config.State) config.State {
 	if len(s.priority.decisions) == 0 {
 		return ApplyPriorityDefaults(state, time.Now())
 	}
-	return buildPriorityAppliedStateFromDecisions(state, s.priority.decisions)
+	return buildPriorityAppliedStateFromDecisions(sharedDomainRoutingState(state), s.priority.decisions)
 }
 
 func ApplyPriorityDefaults(state config.State, now time.Time) config.State {
+	state = sharedDomainRoutingState(state)
+	return buildPriorityAppliedStateFromDecisions(state, defaultPriorityDecisions(state, now))
+}
+
+func defaultPriorityDecisions(state config.State, now time.Time) map[string]priorityDecision {
 	decisions := make(map[string]priorityDecision)
 	providers := providersIndex(state.Providers)
 	for _, policy := range state.PriorityPolicies {
 		if !policy.Enabled || len(policy.Targets) == 0 {
+			continue
+		}
+		if policy.RuleID != "" && len(priorityPolicyEntries(state, policy)) == 0 {
 			continue
 		}
 		provider, ok := providers[policy.ProviderID]
@@ -240,7 +249,7 @@ func ApplyPriorityDefaults(state config.State, now time.Time) config.State {
 			Fingerprint:       priorityPolicyFingerprint(policy, state),
 		}
 	}
-	return buildPriorityAppliedStateFromDecisions(state, decisions)
+	return decisions
 }
 
 func buildPriorityAppliedStateFromDecisions(state config.State, decisions map[string]priorityDecision) config.State {
@@ -251,36 +260,48 @@ func buildPriorityAppliedStateFromDecisions(state config.State, decisions map[st
 		return out
 	}
 
-	controlledProviders := make(map[string]struct{}, len(decisions))
-	for _, decision := range decisions {
-		providerID := strings.TrimSpace(decision.ProviderID)
-		if providerID != "" {
-			controlledProviders[providerID] = struct{}{}
+	controlledProviders := make(map[string]bool, len(decisions))
+	controlledRules := make(map[string]bool, len(decisions))
+	for _, policy := range state.PriorityPolicies {
+		if _, found := decisions[policy.ID]; found {
+			if policy.RuleID != "" {
+				controlledRules[policy.RuleID] = true
+			} else {
+				controlledProviders[policy.ProviderID] = true
+			}
 		}
 	}
 
 	out.Rules = make([]config.Rule, 0, len(state.Rules)+len(decisions))
 	for _, rule := range state.Rules {
-		if _, controlled := controlledProviders[rule.ProviderID]; controlled {
+		if controlledProviders[rule.ProviderID] || controlledRules[rule.ID] {
 			continue
 		}
 		out.Rules = append(out.Rules, rule)
 	}
 
-	appliedProviders := make(map[string]struct{}, len(decisions))
+	appliedScopes := make(map[string]bool, len(decisions))
 	for _, policy := range state.PriorityPolicies {
 		decision, ok := decisions[policy.ID]
+		if ok && policy.RuleID != "" && len(policy.Targets) != 0 &&
+			!locationInPriorityTargets(policy, decision.ActiveLocation) {
+			decision.ActiveLocation = policy.Targets[0].Location
+		}
 		if !ok || decision.Mode == "direct" || strings.TrimSpace(decision.ActiveLocation) == "" {
 			continue
 		}
-		if _, alreadyApplied := appliedProviders[policy.ProviderID]; alreadyApplied {
+		scope := "provider:" + policy.ProviderID
+		if policy.RuleID != "" {
+			scope = "rule:" + policy.RuleID
+		}
+		if appliedScopes[scope] {
 			continue
 		}
-		entries := priorityProviderEntries(state, policy.ProviderID)
+		entries := priorityPolicyEntries(state, policy)
 		if len(entries) == 0 {
 			continue
 		}
-		appliedProviders[policy.ProviderID] = struct{}{}
+		appliedScopes[scope] = true
 		out.Rules = append(out.Rules, config.Rule{
 			ID:               priorityRuleID(policy.ID),
 			Name:             policy.Name,
@@ -302,6 +323,18 @@ func priorityProviderEntries(state config.State, providerID string) []string {
 		raw = append(raw, rule.Domains...)
 	}
 	return domains.NormalizeEntries(raw)
+}
+
+func priorityPolicyEntries(state config.State, policy config.PriorityPolicy) []string {
+	if policy.RuleID == "" {
+		return priorityProviderEntries(state, policy.ProviderID)
+	}
+	for _, rule := range state.Rules {
+		if rule.ID == policy.RuleID && rule.Enabled && rule.ProviderID == policy.ProviderID {
+			return rule.Domains
+		}
+	}
+	return nil
 }
 
 func priorityRuleID(policyID string) string {
@@ -331,6 +364,9 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 	if !policy.Enabled || len(policy.Targets) == 0 {
 		return priorityDecision{}, false
 	}
+	if policy.RuleID != "" && len(priorityPolicyEntries(state, policy)) == 0 {
+		return priorityDecision{}, false
+	}
 	provider, ok := findProvider(state.Providers, policy.ProviderID)
 	if !ok || !provider.Enabled || provider.Type != config.ProviderTypeSubscription {
 		return priorityDecision{}, false
@@ -341,6 +377,9 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 	override, hasOverride := s.priority.overrides[policy.ID]
 	previous := s.priority.decisions[policy.ID]
 	s.priorityMu.RUnlock()
+	if policy.RuleID != "" && !locationInPriorityTargets(policy, previous.ActiveLocation) {
+		previous = priorityDecision{}
+	}
 	if hasOverride {
 		preferred = override.Location
 	}
@@ -695,7 +734,9 @@ func priorityPolicyFingerprint(policy config.PriorityPolicy, state config.State)
 	var b strings.Builder
 	b.WriteString(policy.ProviderID)
 	b.WriteString("\n")
-	for _, entry := range priorityProviderEntries(state, policy.ProviderID) {
+	b.WriteString(policy.RuleID)
+	b.WriteString("\n")
+	for _, entry := range priorityPolicyEntries(state, policy) {
 		b.WriteString(entry)
 		b.WriteString("\n")
 	}
@@ -791,6 +832,7 @@ func (s *Supervisor) PriorityStatus() PriorityStatus {
 			state = loaded
 		}
 	}
+	state = sharedDomainRoutingState(state)
 	providers := providersIndex(state.Providers)
 
 	s.priorityMu.RLock()

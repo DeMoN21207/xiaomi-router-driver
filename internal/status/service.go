@@ -127,6 +127,30 @@ type Service struct {
 	domainHealthSampleInterval  time.Duration
 	siteTrafficSampleInterval   time.Duration
 	dnsProxyHealth              func() dnsproxy.Health
+	sharedDomainLocation        func() string
+}
+
+func (s *Service) SetSharedDomainLocation(provider func() string) {
+	s.sharedDomainLocation = provider
+}
+
+func (s *Service) effectiveRules(state config.State) []config.Rule {
+	rules := state.EffectiveRules()
+	if len(state.SharedDomains.RuleIDs) == 0 || s.sharedDomainLocation == nil {
+		return rules
+	}
+	location := s.sharedDomainLocation()
+	routes := state.SharedDomainRoutes()
+	if location == "" || len(routes) == 0 {
+		return rules
+	}
+	for index, rule := range rules {
+		if rule.ID == routes[0].ID {
+			rules[index].SelectedLocation = location
+			break
+		}
+	}
+	return rules
 }
 
 func (s *Service) SetDNSProxyHealth(provider func() dnsproxy.Health) {
@@ -213,6 +237,7 @@ func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	state.Rules = s.effectiveRules(state)
 
 	domainCount, err := s.domains.Count()
 	if err != nil {

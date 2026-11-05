@@ -39,6 +39,14 @@ MSS_VALUE="${MSS_VALUE:-0}" # 0 means --clamp-mss-to-pmtu
 DNS_HIJACK="${DNS_HIJACK:-1}"
 IPV6_MODE="${IPV6_MODE:-warn}" # warn | allow | disable
 SAFE_DIRECT_ON_ROUTE_FAIL="${SAFE_DIRECT_ON_ROUTE_FAIL:-0}"
+GUARD_IPSET="vpn_manager_guard"
+GUARD_CHAIN="VPN_MANAGER_GUARD"
+EGRESS_GUARD_CHAIN="VPN_MANAGER_EGRESS"
+GUARD_STATE_FILE="${GUARD_STATE_FILE:-}"
+PINNED_IPSETS="${PINNED_IPSETS:-}"
+PINNED_CHAIN="VPN_MANAGER_PINNED"
+PINNED_FILTER_CHAIN="VPN_MANAGER_PIN_GUARD"
+PINNED_STATE_DIR="${GUARD_STATE_FILE:-/tmp/vpn-manager-guard}.pinned"
 CONNTRACK_FLUSH_ON_APPLY="${CONNTRACK_FLUSH_ON_APPLY:-0}"
 # --- END OF SETTINGS ---
 
@@ -432,6 +440,231 @@ ensure_shared_ipset() {
     ipset create "$IPSET_NAME" hash:net family inet timeout "$IPSET_TIMEOUT" -exist
 }
 
+# Independent of runtime tables and their expiring DNS sets. Never cleared by
+# add/sync/del: a stopped process or an interrupted replacement cannot release
+# a previously protected destination to WAN. One bounded set for all routes.
+ensure_guard() {
+    guard_new=0
+    ipset list "$GUARD_IPSET" >/dev/null 2>&1 || guard_new=1
+    ipset create "$GUARD_IPSET" hash:net family inet timeout 0 maxelem 65536 -exist || return 1
+    if [ "$guard_new" = "1" ] && [ -n "$GUARD_STATE_FILE" ] && [ -f "$GUARD_STATE_FILE" ]; then
+        ipset restore -exist < "$GUARD_STATE_FILE" || return 1
+    fi
+    iptables -N "$GUARD_CHAIN" 2>/dev/null || true
+    iptables -t mangle -N "$EGRESS_GUARD_CHAIN" 2>/dev/null || true
+    iptables -N "$PINNED_FILTER_CHAIN" 2>/dev/null || true
+    iptables -t mangle -N "$PINNED_FILTER_CHAIN" 2>/dev/null || true
+    if ! iptables -C "$GUARD_CHAIN" -j "$PINNED_FILTER_CHAIN" >/dev/null 2>&1; then
+        iptables -I "$GUARD_CHAIN" 1 -j "$PINNED_FILTER_CHAIN" || return 1
+    fi
+    if ! iptables -t mangle -C "$EGRESS_GUARD_CHAIN" -j "$PINNED_FILTER_CHAIN" >/dev/null 2>&1; then
+        iptables -t mangle -I "$EGRESS_GUARD_CHAIN" 1 -j "$PINNED_FILTER_CHAIN" || return 1
+    fi
+    if ! iptables -t mangle -C "$EGRESS_GUARD_CHAIN" -o 'sb+' -j RETURN >/dev/null 2>&1; then
+        iptables -t mangle -I "$EGRESS_GUARD_CHAIN" 2 -o 'sb+' -j RETURN || return 1
+    fi
+    # Return traffic to the LAN is unaffected; protected destinations may leave
+    # only through managed tunnel devices. Rules precede ESTABLISHED accepts.
+    if ! iptables -C "$GUARD_CHAIN" -o 'sb+' -j RETURN >/dev/null 2>&1; then
+        iptables -I "$GUARD_CHAIN" 2 -o 'sb+' -j RETURN || return 1
+    fi
+    case "$VPN_IFACE" in
+        sb*) ;;
+        *) if ! iptables -C "$GUARD_CHAIN" -o "$VPN_IFACE" -j RETURN >/dev/null 2>&1; then
+               iptables -I "$GUARD_CHAIN" 2 -o "$VPN_IFACE" -j RETURN || return 1
+           fi
+           if ! iptables -t mangle -C "$EGRESS_GUARD_CHAIN" -o "$VPN_IFACE" -j RETURN >/dev/null 2>&1; then
+               iptables -t mangle -I "$EGRESS_GUARD_CHAIN" 2 -o "$VPN_IFACE" -j RETURN || return 1
+           fi ;;
+    esac
+    if ! iptables -C "$GUARD_CHAIN" -m set --match-set "$GUARD_IPSET" dst -j REJECT >/dev/null 2>&1; then
+        iptables -A "$GUARD_CHAIN" -m set --match-set "$GUARD_IPSET" dst -j REJECT || return 1
+    fi
+    if ! iptables -t mangle -C "$EGRESS_GUARD_CHAIN" -m set --match-set "$GUARD_IPSET" dst -j DROP >/dev/null 2>&1; then
+        iptables -t mangle -A "$EGRESS_GUARD_CHAIN" -m set --match-set "$GUARD_IPSET" dst -j DROP || return 1
+    fi
+    # Also protect marked packets even if their destination set was cleared.
+    # Tunnel RETURN rules above remain the only permitted output for them.
+    guard_marks="$FWMARK"
+    if [ -n "$GUARD_STATE_FILE" ] && [ -r "${GUARD_STATE_FILE}.marks" ]; then
+        guard_marks="$guard_marks $(cat "${GUARD_STATE_FILE}.marks")"
+    fi
+    for guard_mark in $guard_marks; do
+        [ "$guard_mark" = "0" ] || [ "$guard_mark" = "0x0" ] && continue
+        if ! iptables -C "$GUARD_CHAIN" -m mark --mark "$guard_mark" -j REJECT >/dev/null 2>&1; then
+            iptables -A "$GUARD_CHAIN" -m mark --mark "$guard_mark" -j REJECT || return 1
+        fi
+        if ! iptables -t mangle -C "$EGRESS_GUARD_CHAIN" -m mark --mark "$guard_mark" -j DROP >/dev/null 2>&1; then
+            iptables -t mangle -A "$EGRESS_GUARD_CHAIN" -m mark --mark "$guard_mark" -j DROP || return 1
+        fi
+    done
+    if [ -n "$GUARD_STATE_FILE" ]; then
+        mkdir -p "$(dirname "$GUARD_STATE_FILE")" || return 1
+        printf '%s\n' $guard_marks | sort -u > "${GUARD_STATE_FILE}.marks.tmp" &&
+            mv "${GUARD_STATE_FILE}.marks.tmp" "${GUARD_STATE_FILE}.marks" || return 1
+    fi
+    for guard_parent in FORWARD; do
+        if ! iptables -C "$guard_parent" -j "$GUARD_CHAIN" >/dev/null 2>&1; then
+            iptables -I "$guard_parent" 1 -j "$GUARD_CHAIN" || return 1
+        fi
+    done
+    # OUTPUT's -o may still name the original interface after mangle changes a
+    # mark. POSTROUTING sees the final interface, and covers both LAN and local
+    # packets. Install it before retiring the legacy OUTPUT check.
+    if ! iptables -t mangle -C POSTROUTING -j "$EGRESS_GUARD_CHAIN" >/dev/null 2>&1; then
+        iptables -t mangle -I POSTROUTING 1 -j "$EGRESS_GUARD_CHAIN" || return 1
+    fi
+    while iptables -D OUTPUT -j "$GUARD_CHAIN" >/dev/null 2>&1; do :; done
+}
+
+# Fixed routes remember destinations independently of expiring routing sets.
+# Apply their marks after ordinary marks; reject an exit through any other TUN.
+ensure_pinned_routes() {
+    mkdir -p "$PINNED_STATE_DIR" || return 1
+    iptables -t mangle -N "$PINNED_CHAIN" 2>/dev/null || true
+    for pin_set in $(printf '%s' "$PINNED_IPSETS" | tr ',' ' '); do
+        case "$pin_set" in vpn_pin_*) ;; *) return 1 ;; esac
+        ipset create "$pin_set" hash:net family inet timeout 0 maxelem 65536 -exist || return 1
+        if ! iptables -t mangle -C "$PINNED_FILTER_CHAIN" -m set --match-set "$pin_set" dst ! -o "$VPN_IFACE" -j DROP >/dev/null 2>&1; then
+            iptables -t mangle -I "$PINNED_FILTER_CHAIN" 1 -m set --match-set "$pin_set" dst ! -o "$VPN_IFACE" -j DROP || return 1
+        fi
+        if [ -f "$PINNED_STATE_DIR/$pin_set.restore" ]; then
+            ipset restore -exist < "$PINNED_STATE_DIR/$pin_set.restore" || return 1
+        fi
+        if ipset list "$IPSET_NAME" >/dev/null 2>&1; then
+            ipset save "$IPSET_NAME" | awk -v target="$pin_set" '$1 == "add" {print "add", target, $3, "timeout 0"}' | ipset restore -exist || return 1
+        fi
+        if [ -f "$DOMAIN_LIST" ]; then
+            while IFS= read -r pin_entry; do
+                pin_entry=$(printf '%s' "$pin_entry" | tr -d '\r')
+                if is_ipv4_entry "$pin_entry"; then
+                    ipset add "$pin_set" "$pin_entry" timeout 0 -exist || return 1
+                fi
+            done < "$DOMAIN_LIST"
+        fi
+        # Install the new constraint before retiring a previous location/mark.
+        if ! iptables -C "$PINNED_FILTER_CHAIN" -m set --match-set "$pin_set" dst ! -o "$VPN_IFACE" -j REJECT >/dev/null 2>&1; then
+            iptables -I "$PINNED_FILTER_CHAIN" 1 -m set --match-set "$pin_set" dst ! -o "$VPN_IFACE" -j REJECT || return 1
+        fi
+        if [ -r "$PINNED_STATE_DIR/$pin_set.binding" ]; then
+            read -r pin_old_iface pin_old_mark < "$PINNED_STATE_DIR/$pin_set.binding"
+            if [ "$pin_old_iface" != "$VPN_IFACE" ]; then
+                while iptables -D "$PINNED_FILTER_CHAIN" -m set --match-set "$pin_set" dst ! -o "$pin_old_iface" -j REJECT >/dev/null 2>&1; do :; done
+                while iptables -t mangle -D "$PINNED_FILTER_CHAIN" -m set --match-set "$pin_set" dst ! -o "$pin_old_iface" -j DROP >/dev/null 2>&1; do :; done
+            fi
+            if [ "$pin_old_mark" != "$FWMARK" ]; then
+                while iptables -t mangle -D "$PINNED_CHAIN" -m set --match-set "$pin_set" dst -j MARK --set-mark "$pin_old_mark" >/dev/null 2>&1; do :; done
+            fi
+        fi
+        ipset save "$pin_set" > "$PINNED_STATE_DIR/$pin_set.restore.tmp" &&
+            mv "$PINNED_STATE_DIR/$pin_set.restore.tmp" "$PINNED_STATE_DIR/$pin_set.restore" || return 1
+        printf '%s %s\n' "$VPN_IFACE" "$FWMARK" > "$PINNED_STATE_DIR/$pin_set.binding.tmp" &&
+            mv "$PINNED_STATE_DIR/$pin_set.binding.tmp" "$PINNED_STATE_DIR/$pin_set.binding" || return 1
+    done
+    for pin_binding in "$PINNED_STATE_DIR"/*.binding; do
+        [ -f "$pin_binding" ] || continue
+        pin_set=${pin_binding##*/}
+        pin_set=${pin_set%.binding}
+        read -r pin_iface pin_mark < "$pin_binding" || return 1
+        if ! ipset list "$pin_set" >/dev/null 2>&1; then
+            ipset restore -exist < "$PINNED_STATE_DIR/$pin_set.restore" || return 1
+        fi
+        ipset save "$pin_set" | awk -v target="$GUARD_IPSET" '$1 == "add" {print "add", target, $3, "timeout 0"}' | ipset restore -exist || return 1
+        # Explicitly removing a fixed route or giving it a rotation policy retires
+        # its country constraint. Its old addresses remain protected from WAN.
+        if [ -f "${GUARD_STATE_FILE}.pinned-active" ] && ! grep -Fx "$pin_set" "${GUARD_STATE_FILE}.pinned-active" >/dev/null; then
+            while iptables -D "$PINNED_FILTER_CHAIN" -m set --match-set "$pin_set" dst ! -o "$pin_iface" -j REJECT >/dev/null 2>&1; do :; done
+            while iptables -t mangle -D "$PINNED_FILTER_CHAIN" -m set --match-set "$pin_set" dst ! -o "$pin_iface" -j DROP >/dev/null 2>&1; do :; done
+            while iptables -t mangle -D "$PINNED_CHAIN" -m set --match-set "$pin_set" dst -j MARK --set-mark "$pin_mark" >/dev/null 2>&1; do :; done
+            rm -f "$pin_binding" || return 1
+            continue
+        fi
+        if ! iptables -C "$PINNED_FILTER_CHAIN" -m set --match-set "$pin_set" dst ! -o "$pin_iface" -j REJECT >/dev/null 2>&1; then
+            iptables -I "$PINNED_FILTER_CHAIN" 1 -m set --match-set "$pin_set" dst ! -o "$pin_iface" -j REJECT || return 1
+        fi
+        if ! iptables -t mangle -C "$PINNED_FILTER_CHAIN" -m set --match-set "$pin_set" dst ! -o "$pin_iface" -j DROP >/dev/null 2>&1; then
+            iptables -t mangle -I "$PINNED_FILTER_CHAIN" 1 -m set --match-set "$pin_set" dst ! -o "$pin_iface" -j DROP || return 1
+        fi
+        if ! iptables -t mangle -C "$PINNED_CHAIN" -m set --match-set "$pin_set" dst -j MARK --set-mark "$pin_mark" >/dev/null 2>&1; then
+            iptables -t mangle -A "$PINNED_CHAIN" -m set --match-set "$pin_set" dst -j MARK --set-mark "$pin_mark" || return 1
+        fi
+    done
+    # Ordinary route rules are inserted at the head; pinned marks run last.
+    if ! iptables -t mangle -C OUTPUT -j "$PINNED_CHAIN" >/dev/null 2>&1; then
+        iptables -t mangle -A OUTPUT -j "$PINNED_CHAIN" || return 1
+    fi
+    for pin_lan in "$LAN_IFACE" "$DOCKER_IFACE"; do
+        [ -n "$pin_lan" ] || continue
+        if ! iptables -t mangle -C PREROUTING -i "$pin_lan" -j "$PINNED_CHAIN" >/dev/null 2>&1; then
+            iptables -t mangle -A PREROUTING -i "$pin_lan" -j "$PINNED_CHAIN" || return 1
+        fi
+    done
+}
+
+ensure_firewall_processing() {
+    # Qualcomm ECM/SFE can forward established flows outside netfilter. Stop
+    # new acceleration and drain existing accelerated flows without clearing
+    # conntrack or unloading the network drivers.
+    if [ ! -d /sys/module/ecm ]; then
+        return 0
+    fi
+    ecm_dir=/sys/kernel/debug/ecm
+    ecm_changed=0
+    # Vendor services can reset front_end_ipv4_stop. The independent default
+    # classifier value 1 (ECM_CLASSIFIER_ACCELERATION_MODE_NO) vetoes new flows
+    # even when that frontend is resumed. Value 0 means DONT_CARE, not disabled.
+    for ecm_stop in "$ecm_dir/front_end_ipv4_stop" "$ecm_dir/front_end_ipv6_stop" "$ecm_dir/ecm_classifier_default/accel_mode"; do
+        if [ ! -r "$ecm_stop" ] || [ ! -w "$ecm_stop" ]; then
+            echo "Error: cannot disable ECM acceleration; firewall protection is not verified." >&2
+            return 1
+        fi
+        if [ "$(cat "$ecm_stop")" != "1" ]; then
+            echo 1 > "$ecm_stop" || return 1
+            ecm_changed=1
+        fi
+    done
+    if [ "$ecm_changed" = "1" ]; then
+        echo 1 > "$ecm_dir/ecm_db/defunct_all" || return 1
+    fi
+    for ecm_attempt in 1 2 3 4 5 6; do
+        ecm_active=0
+        for ecm_count in "$ecm_dir"/ecm_*_ipv[46]/accelerated_count; do
+            [ -r "$ecm_count" ] || continue
+            ecm_active=$((ecm_active + $(cat "$ecm_count")))
+        done
+        [ "$ecm_active" = "0" ] && return 0
+        [ "$ecm_attempt" = "6" ] && break
+        echo 1 > "$ecm_dir/ecm_db/defunct_all" || return 1
+        sleep 1
+    done
+    echo "Error: accelerated connections remain outside firewall processing." >&2
+    return 1
+}
+
+protect_known_destinations() {
+    ensure_guard || return 1
+    ensure_pinned_routes || return 1
+    ensure_firewall_processing || return 1
+    handle_ipv6_mode || return 1
+    ensure_dns_hijack_rules || return 1
+    if ipset list "$IPSET_NAME" >/dev/null 2>&1; then
+        ipset save "$IPSET_NAME" | awk -v target="$GUARD_IPSET" '$1 == "add" {print "add", target, $3, "timeout 0"}' | ipset restore -exist || return 1
+    fi
+    if [ -f "$DOMAIN_LIST" ]; then
+        while IFS= read -r guard_entry; do
+            guard_entry=$(printf '%s' "$guard_entry" | tr -d '\r')
+            if is_ipv4_entry "$guard_entry"; then
+                ipset add "$GUARD_IPSET" "$guard_entry" timeout 0 -exist || return 1
+            fi
+        done < "$DOMAIN_LIST"
+    fi
+    if [ -n "$GUARD_STATE_FILE" ]; then
+        mkdir -p "$(dirname "$GUARD_STATE_FILE")" || return 1
+        ipset save "$GUARD_IPSET" > "${GUARD_STATE_FILE}.tmp" &&
+            mv "${GUARD_STATE_FILE}.tmp" "$GUARD_STATE_FILE" || return 1
+    fi
+}
+
 iptables_chain_exists() {
     iptables -nL "$1" >/dev/null 2>&1
 }
@@ -462,13 +695,17 @@ handle_ipv6_mode() {
                 /proc/sys/net/ipv6/conf/default/disable_ipv6 \
                 "/proc/sys/net/ipv6/conf/${LAN_IFACE}/disable_ipv6"; do
                 if [ -w "$path" ]; then
-                    echo 1 > "$path" 2>/dev/null && changed=1
+                    echo 1 > "$path" 2>/dev/null || return 1
+                    changed=1
                 fi
             done
             if [ "$changed" = "1" ]; then
                 echo "--> IPv6 disabled for routed LAN path to avoid IPv6 bypass/leaks."
             else
-                echo "Warning: IPv6 disable requested but sysctl paths were not writable." >&2
+                if [ -d /proc/sys/net/ipv6 ]; then
+                    echo "Error: cannot disable IPv6; refusing unprotected routing." >&2
+                    return 1
+                fi
             fi
             ;;
         warn|*)
@@ -603,26 +840,23 @@ ensure_domain_stats_jumps() {
 }
 
 ensure_vpn_route() {
+    # This route remains when the TUN disappears. Never fall through to main.
+    ip route replace blackhole default metric 32760 table "$TABLE_NUM" || return 1
     if ! ip link show "$VPN_IFACE" >/dev/null 2>&1; then
         echo "Error: VPN interface '$VPN_IFACE' is not present; refusing to mark traffic into a dead route." >&2
         return 1
     fi
 
     if [ "$VPN_ROUTE_MODE" = "dev" ]; then
-        ip route replace default dev "$VPN_IFACE" table "$TABLE_NUM"
+        ip route replace default dev "$VPN_IFACE" metric 10 table "$TABLE_NUM"
         return $?
     fi
 
-    ip route replace default via "$VPN_GATEWAY" dev "$VPN_IFACE" table "$TABLE_NUM"
+    ip route replace default via "$VPN_GATEWAY" dev "$VPN_IFACE" metric 10 table "$TABLE_NUM"
 }
 
 safe_direct_after_route_failure() {
-    if [ "$SAFE_DIRECT_ON_ROUTE_FAIL" = "1" ]; then
-        echo "--> Safe direct mode: removing stale marks so LAN traffic is not blackholed." >&2
-        cleanup_firewall
-        ip route flush table "$TABLE_NUM" >/dev/null 2>&1 || true
-        ip route flush cache >/dev/null 2>&1 || true
-    fi
+    echo "--> VPN route unavailable; keeping marks and the WAN guard (fail closed)." >&2
 }
 
 validate_vpn_route_or_safe_direct() {
@@ -695,7 +929,7 @@ cleanup_firewall() {
     while ip rule del fwmark "$FWMARK" table "$TABLE_NUM" >/dev/null 2>&1; do :; done
 
     cleanup_forward_accept_rules
-    cleanup_dns_hijack_rules
+    # DNS interception is shared protection, not owned by an individual TUN.
     cleanup_mss_clamp_rules
 
     while iptables -t nat -D POSTROUTING -o "$VPN_IFACE" -j MASQUERADE >/dev/null 2>&1; do :; done
@@ -715,9 +949,15 @@ ensure_dnsmasq_conf_dir() {
 }
 
 dnsmasq_conf_references_live_ipset() {
-    fragment="$1"
-    for set_name in $(awk -F/ '/^ipset=\// {print $NF}' "$fragment" 2>/dev/null | tr ',' ' '); do
+    ipset_fragment="$1"
+    for set_name in $(awk -F/ '/^ipset=\// {print $NF}' "$ipset_fragment" 2>/dev/null | tr ',' ' '); do
         [ -z "$set_name" ] && continue
+        # Persistent protection/accounting sets do not provide a live route.
+        # Keeping their retired DNS selectors can override a current tunnel's
+        # selector and leave new answers protected but completely unmarked.
+        case "$set_name" in
+            "$GUARD_IPSET"|vpn_pin_*|vd_*|vpn_d_*) continue ;;
+        esac
         if ipset list "$set_name" >/dev/null 2>&1; then
             return 0
         fi
@@ -727,9 +967,16 @@ dnsmasq_conf_references_live_ipset() {
 
 cleanup_dnsmasq_conf_fragments() {
     dnsmasq_conf_dir=$(dirname "$DNSMASQ_CONFIG_FILE")
+    live_domains_file=$(mktemp /tmp/vpn-manager-live-dns.XXXXXX) || return 1
+    for live_fragment in "$dnsmasq_conf_dir"/vpn_dns*.conf; do
+        [ -f "$live_fragment" ] || continue
+        if dnsmasq_conf_references_live_ipset "$live_fragment"; then
+            awk -F/ '/^ipset=\// {for (i=2;i<NF;i++) print tolower($i)}' "$live_fragment" >> "$live_domains_file"
+        fi
+    done
     for fragment in "$dnsmasq_conf_dir"/vpn_dns*.conf "$dnsmasq_conf_dir"/vpn_dns*.conf.bak; do
         [ -e "$fragment" ] || continue
-        if [ "$fragment" = "$DNSMASQ_CONFIG_FILE" ]; then
+        if [ "$fragment" = "$DNSMASQ_CONFIG_FILE" ] && [ "${1:-}" != "include-current" ]; then
             continue
         fi
         case "$fragment" in
@@ -738,18 +985,55 @@ cleanup_dnsmasq_conf_fragments() {
                 if dnsmasq_conf_references_live_ipset "$fragment"; then
                     continue
                 fi
+                # Keep learning destinations of stopped routes into the guard,
+                # but remove selectors now covered by a live route. dnsmasq's
+                # more-specific retired selectors must not shadow live parents.
+                pruned_fragment=$(mktemp "$dnsmasq_conf_dir/.vpn-dns-prune.XXXXXX") || { rm -f "$live_domains_file"; return 1; }
+                if ! awk -F/ '
+                    FILENAME == ARGV[1] {live[$0]=1; next}
+                    function covered(domain) {
+                        domain=tolower(domain)
+                        if (domain in live) return 1
+                        while (index(domain,".") > 0) {
+                            sub(/^[^.]*\./,"",domain)
+                            if (domain in live) return 1
+                        }
+                        return 0
+                    }
+                    ($1 == "ipset=" || $1 == "server=") && NF > 2 {
+                        selector=$1 "/"; count=0
+                        for (i=2;i<NF;i++) if (!covered($i)) {selector=selector $i "/"; count++}
+                        if (count) print selector $NF
+                        next
+                    }
+                    {print}
+                ' "$live_domains_file" "$fragment" > "$pruned_fragment"; then
+                    rm -f "$pruned_fragment" "$live_domains_file"
+                    return 1
+                fi
+                if cmp -s "$fragment" "$pruned_fragment"; then
+                    rm -f "$pruned_fragment"
+                    continue
+                fi
+                if [ -s "$pruned_fragment" ]; then
+                    mv "$pruned_fragment" "$fragment" || { rm -f "$live_domains_file"; return 1; }
+                    DNSMASQ_CONFIG_CHANGED=1
+                    continue
+                fi
+                rm -f "$pruned_fragment"
                 ;;
         esac
         if rm -f "$fragment" >/dev/null 2>&1; then
             DNSMASQ_CONFIG_CHANGED=1
         fi
     done
+    rm -f "$live_domains_file"
 }
 
 render_dnsmasq_config() {
     echo "--> Generating dnsmasq config to populate ipset..."
     ensure_dnsmasq_conf_dir
-    cleanup_dnsmasq_conf_fragments
+    cleanup_dnsmasq_conf_fragments || return 1
 
     tmp_file="${DNSMASQ_CONFIG_FILE}.$$"
     : > "$tmp_file" || return 1
@@ -781,7 +1065,7 @@ render_dnsmasq_config() {
             continue
         fi
 
-        ipset_targets="$IPSET_NAME"
+        ipset_targets="$GUARD_IPSET${PINNED_IPSETS:+,$PINNED_IPSETS},$IPSET_NAME"
         dom_set=""
 
         if [ "$ENABLE_DOMAIN_STATS" = "1" ]; then
@@ -818,6 +1102,7 @@ render_dnsmasq_config() {
         rm -f "$DNSMASQ_CONFIG_BACKUP" >/dev/null 2>&1 || true
     fi
     mv "$tmp_file" "$DNSMASQ_CONFIG_FILE"
+    cleanup_dnsmasq_conf_fragments || return 1
 }
 
 flush_conntrack_if_requested() {
@@ -889,12 +1174,11 @@ flush_conntrack_if_requested() {
 add_routes() {
     echo "Configuring DNS and policy-based routing..."
 
-    handle_ipv6_mode
+    handle_ipv6_mode || exit 1
     enable_ipv4_forwarding
 
     # Validate the dataplane before removing the previously working rules.
-    # If the tunnel disappeared, safe direct mode removes stale marks instead
-    # of sending LAN packets into a dead table.
+    # If the tunnel disappeared, retain protection and fail closed.
     echo "--> Validating VPN route in table '$TABLE_NUM'..."
     if ! validate_vpn_route_or_safe_direct; then
         echo "Error: failed to create a usable VPN route for '$VPN_IFACE' in table '$TABLE_NUM'." >&2
@@ -967,7 +1251,8 @@ add_routes() {
 
     # 6a. Force LAN clients to use router dnsmasq so ipset is populated.
     if ! ensure_dns_hijack_rules; then
-        echo "Warning: failed to add DNS hijack rules; devices using external DNS may bypass domain routing." >&2
+        echo "Error: failed to add DNS hijack rules." >&2
+        exit 1
     fi
 
     # 6b. Clamp TCP MSS to avoid MTU blackholes through tunnels.
@@ -1044,7 +1329,8 @@ sync_routes() {
     fi
 
     if ! ensure_dns_hijack_rules; then
-        echo "Warning: failed to refresh DNS hijack rules." >&2
+        echo "Error: failed to refresh DNS hijack rules." >&2
+        exit 1
     fi
     if ! ensure_mss_clamp_rules; then
         echo "Warning: failed to refresh TCPMSS clamp rules." >&2
@@ -1074,8 +1360,14 @@ delete_routes() {
     if [ -f "$DNSMASQ_CONFIG_FILE" ]; then
         echo "--> Removing dnsmasq config and reloading..."
         cp "$DNSMASQ_CONFIG_FILE" "$DNSMASQ_CONFIG_BACKUP" >/dev/null 2>&1 || true
-        rm -f "$DNSMASQ_CONFIG_FILE"
+        # Keep learning protected destinations while the runtime is stopped.
+        # Remove references to the route's deleted sets, retaining the guard.
+        sed "s|^ipset=\\(/[^ ]*/\\).*|ipset=\\1${GUARD_IPSET}${PINNED_IPSETS:+,$PINNED_IPSETS}|" "$DNSMASQ_CONFIG_FILE" > "${DNSMASQ_CONFIG_FILE}.tmp" || exit 1
+        mv "${DNSMASQ_CONFIG_FILE}.tmp" "$DNSMASQ_CONFIG_FILE" || exit 1
         DNSMASQ_CONFIG_CHANGED=1
+        # Do not leave a retired guard-only selector shadowing the DNS entry
+        # installed by the replacement tunnel. Historical IP guards stay intact.
+        cleanup_dnsmasq_conf_fragments include-current || exit 1
         if ! apply_dnsmasq_changes; then
             exit 1
         fi
@@ -1091,7 +1383,7 @@ delete_routes() {
 
 # --- SCRIPT LOGIC ---
 # Check for required utilities
-for cmd in ip iptables ipset tr grep; do
+for cmd in ip iptables ipset tr grep awk sed; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Error: required utility '$cmd' not found."
         exit 1
@@ -1105,13 +1397,21 @@ fi
 trap release_routing_lock EXIT INT TERM
 
 case "$1" in
+    guard)
+        protect_known_destinations || exit 1
+        ;;
     add)
+        protect_known_destinations || exit 1
         add_routes
+        protect_known_destinations || exit 1
         ;;
     sync|refresh)
+        protect_known_destinations || exit 1
         sync_routes
+        protect_known_destinations || exit 1
         ;;
     del|delete)
+        protect_known_destinations || exit 1
         delete_routes
         ;;
     *)

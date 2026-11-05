@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -409,6 +410,39 @@ func TestRestoreRuleIfAbsentDoesNotOverwriteRecreatedRule(t *testing.T) {
 	}
 	if len(loaded.Rules) != 1 || loaded.Rules[0].Name != "Recreated" {
 		t.Fatalf("recreated rule was not preserved: %+v", loaded.Rules)
+	}
+}
+
+func TestSharedDomainListPersistsWithoutOverwritingOwnEntries(t *testing.T) {
+	db := openTestDB(t)
+	manager := NewManager(db, filepath.Join(t.TempDir(), "vpn-state.json"))
+	state := State{
+		Providers: []Provider{{ID: "vpn", Name: "VPN", Type: ProviderTypeSubscription, Source: "https://example.com/sub", Enabled: true}},
+		Rules: []Rule{
+			{ID: "main", Name: "Main", ProviderID: "vpn", Domains: []string{"own.test"}, Enabled: true},
+			{ID: "reserve", Name: "Reserve", ProviderID: "vpn", Domains: []string{"reserve.test"}, Enabled: true},
+		},
+		SharedDomains: SharedDomainList{Entries: []string{"Shared.test"}, RuleIDs: []string{"main", "reserve"}},
+	}
+	if _, err := manager.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := manager.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(loaded.SharedDomains.RuleIDs, []string{"main", "reserve"}) ||
+		!slices.Equal(loaded.SharedDomains.Entries, []string{"shared.test"}) {
+		t.Fatalf("unexpected saved shared list: %+v", loaded.SharedDomains)
+	}
+	effective := loaded.EffectiveRules()
+	if !slices.Equal(effective[0].Domains, []string{"shared.test"}) || len(effective[1].Domains) != 0 {
+		t.Fatalf("expected the shared list only on the primary route: %+v", effective)
+	}
+	loaded.SharedDomains.RuleIDs = nil
+	restored := loaded.EffectiveRules()
+	if !slices.Equal(restored[0].Domains, []string{"own.test"}) || !slices.Equal(restored[1].Domains, []string{"reserve.test"}) {
+		t.Fatalf("expected the original lists after disabling shared mode: %+v", restored)
 	}
 }
 

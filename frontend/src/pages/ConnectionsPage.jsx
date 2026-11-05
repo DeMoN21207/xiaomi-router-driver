@@ -1,5 +1,6 @@
 import { useDeferredValue, useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { applyRules, fetchJSON, refreshSubscription as requestSubscriptionRefresh } from "../api.js";
+import { collectConnectionDomains, sharedDomainPriorityStatus } from "../connectionDomains.js";
 import { parseDomainInput } from "../domainInput.js";
 import { useI18n } from "../i18n.jsx";
 import Icon from "../components/Icon.jsx";
@@ -199,6 +200,7 @@ export default function ConnectionsPage() {
   const providers = config?.providers ?? [];
   const rules = config?.rules ?? [];
   const priorityPolicies = config?.priorityPolicies ?? [];
+  const sharedDomains = config?.sharedDomains;
   const runtimeMap = new Map((status?.providers ?? []).map((p) => [p.id, p]));
   const failoverOverrideMap = new Map((failoverStatus?.activeOverrides ?? []).map((item) => [item.ruleId, item]));
   const failoverProviderMap = new Map((failoverStatus?.providers ?? []).map((item) => [item.providerId, item]));
@@ -258,6 +260,27 @@ export default function ConnectionsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  async function saveSharedDomains(change) {
+    setBusy(true);
+    try {
+      await fetchJSON("/api/config/shared-domains", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(change),
+        timeoutMs: 150_000,
+      });
+      await refresh();
+      showToast(t("connections.domainsUpdated"));
+      return true;
+    } catch (error) {
+      await refresh();
+      setPageError(error.message);
+      showToast(error.message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function uploadOvpn(event) {
     const file = event.target.files?.[0];
@@ -540,6 +563,25 @@ export default function ConnectionsPage() {
         </form>
       )}
 
+      {sharedDomains && (
+        <SharedDomainEditor
+          list={sharedDomains}
+          activeLocation={sharedDomainPriorityStatus(sharedDomains, rules, priorityPolicies, priorityStatusMap)?.activeLocation}
+          busy={busy}
+          onSave={saveSharedDomains}
+          t={t}
+        />
+      )}
+      <SharedDomainsPanel
+        rules={rules.map((rule) => {
+          if (!rule.enabled || !sharedDomains?.ruleIds?.includes(rule.id)) return rule;
+          const primary = sharedDomains.ruleIds.find((id) => rules.some((item) => item.enabled && item.id === id));
+          return { ...rule, domains: rule.id === primary ? (sharedDomains.entries || []) : [] };
+        })}
+        providers={providers}
+        t={t}
+      />
+
       <div className="space-y-6">
         {providers.map((provider) => {
           const runtime = runtimeMap.get(provider.id);
@@ -563,6 +605,8 @@ export default function ConnectionsPage() {
               priorityPolicies={providerPriorityPolicies}
               priorityStatusMap={priorityStatusMap}
               busy={busy}
+              sharedDomains={sharedDomains}
+              onSharedDomainsChange={saveSharedDomains}
               failoverOverrides={failoverOverrideMap}
               failoverProvider={failoverProviderMap.get(provider.id)}
               domainHealthMap={domainHealthMap}
@@ -607,6 +651,137 @@ export default function ConnectionsPage() {
 }
 
 
+function SharedDomainEditor({ list, activeLocation, busy, onSave, t }) {
+  const [draft, setDraft] = useState(null);
+  const entries = list.entries || [];
+
+  return (
+    <section aria-labelledby="shared-domain-editor" className="space-y-3 rounded-2xl bg-surface-container-low p-4 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 id="shared-domain-editor" className="font-headline text-lg font-bold text-on-surface">
+          {t("connections.sharedList")} ({entries.length})
+        </h2>
+        {draft === null && (
+          <button
+            type="button"
+            onClick={() => setDraft(entries.join("\n"))}
+            disabled={busy}
+            className="rounded-lg bg-primary/10 px-3 py-2 text-sm font-medium text-primary"
+          >
+            {t("connections.editSharedList")}
+          </button>
+        )}
+      </div>
+      <p className="text-sm text-on-surface-variant">{t("connections.sharedListHelp")}</p>
+      {activeLocation && <p className="text-sm text-on-surface">{t("connections.sharedListActive", { location: activeLocation })}</p>}
+      {draft !== null && (
+        <form
+          className="space-y-2"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (await onSave({ entries: parseDomainInput(draft) })) setDraft(null);
+          }}
+        >
+          <textarea
+            aria-label={t("connections.sharedList")}
+            placeholder={t("connections.domainsPlaceholder")}
+            className="w-full resize-y rounded-lg bg-surface-container-highest p-3 font-mono text-sm"
+            rows={5}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            disabled={busy}
+          />
+          <button type="submit" disabled={busy} className="rounded-lg bg-primary/10 px-3 py-2 text-sm font-medium text-primary">
+            {t("connections.prioritySave")}
+          </button>
+          <button type="button" disabled={busy} onClick={() => setDraft(null)} className="px-3 py-2 text-sm">
+            {t("connections.cancel")}
+          </button>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function SharedDomainsPanel({ rules, providers, t }) {
+  const [query, setQuery] = useState("");
+  const [limit, setLimit] = useState(DOMAIN_PREVIEW_LIMIT);
+  const entries = useMemo(() => collectConnectionDomains(rules), [rules]);
+  const providerById = useMemo(() => new Map(providers.map((provider) => [provider.id, provider])), [providers]);
+  const normalizedQuery = useDeferredValue(query.trim().toLowerCase());
+  const matches = useMemo(
+    () => entries.filter(({ entry }) => entry.toLowerCase().includes(normalizedQuery)),
+    [entries, normalizedQuery],
+  );
+
+  if (entries.length === 0) return null;
+
+  return (
+    <section aria-labelledby="shared-domains-title" className="space-y-3 rounded-2xl bg-surface-container-low p-4 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 id="shared-domains-title" className="font-headline text-lg font-bold text-on-surface">
+          {t("connections.sharedDomains")} <span className="text-sm text-on-surface-variant">({entries.length})</span>
+        </h2>
+        <input
+          type="search"
+          aria-label={t("connections.sharedDomainsSearch")}
+          placeholder={t("connections.sharedDomainsSearch")}
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setLimit(DOMAIN_PREVIEW_LIMIT);
+          }}
+          className="w-full rounded-lg bg-surface-container-highest px-3 py-2 text-sm text-on-surface focus:ring-1 focus:ring-primary sm:w-64"
+        />
+      </div>
+      {matches.length === 0 ? (
+        <p className="text-sm text-on-surface-variant">{t("connections.sharedDomainsNoMatches")}</p>
+      ) : (
+        <div className="max-h-80 overflow-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="sticky top-0 bg-surface-container-low text-on-surface-variant">
+              <tr>
+                <th scope="col" className="px-3 py-2">{t("connections.sharedDomainsEntry")}</th>
+                <th scope="col" className="px-3 py-2">{t("connections.sharedDomainsRoute")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {matches.slice(0, limit).map(({ entry, rules: entryRules }) => (
+                <tr key={entry} className="border-t border-outline-variant/20 align-top">
+                  <td className="break-all px-3 py-2 font-mono text-on-surface">{entry}</td>
+                  <td className="px-3 py-2 text-on-surface-variant">
+                    <ul className="space-y-1">
+                      {entryRules.map((rule) => {
+                        const provider = providerById.get(rule.providerId);
+                        const disabled = rule.enabled === false || provider?.enabled === false;
+                        return (
+                          <li key={rule.id}>
+                            {formatRuleConflictLabel(rule, provider)}
+                            {disabled ? ` · ${t("connections.off")}` : ""}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {matches.length > limit && (
+        <button
+          type="button"
+          onClick={() => setLimit((previous) => previous + DOMAIN_PREVIEW_LIMIT)}
+          className="rounded-lg bg-surface-container-high px-3 py-2 text-sm font-semibold text-on-surface"
+        >
+          {t("connections.sharedDomainsMore", { remaining: matches.length - limit })}
+        </button>
+      )}
+    </section>
+  );
+}
+
 function formatFailoverSummary(overrides, t) {
   if (!Array.isArray(overrides) || overrides.length === 0) {
     return "";
@@ -635,7 +810,7 @@ function formatFailoverOverrideMessage(override, t) {
   return t("connections.failoverProvider", { from: original || override.originalProviderId || "-", to: active || override.activeProviderId || "-" });
 }
 
-function ProviderCard({ provider, providers, rules, toneClasses, statusLabel, isOnline, providerRules, priorityPolicies, priorityStatusMap, busy, failoverOverrides, failoverProvider, domainHealthMap, onDelete, onToggleEnabled, onRefreshSubscription, refreshingProviderId, onDomainsChange, showToast, setPageError, t }) {
+function ProviderCard({ provider, providers, rules, toneClasses, statusLabel, isOnline, providerRules, priorityPolicies, priorityStatusMap, busy, sharedDomains, onSharedDomainsChange, failoverOverrides, failoverProvider, domainHealthMap, onDelete, onToggleEnabled, onRefreshSubscription, refreshingProviderId, onDomainsChange, showToast, setPageError, t }) {
   const [expanded, setExpanded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
@@ -987,6 +1162,9 @@ function ProviderCard({ provider, providers, rules, toneClasses, statusLabel, is
                 key={rule.id}
                 rule={rule}
                 provider={provider}
+                sharedDomains={sharedDomains}
+                sharedBusy={busy}
+                onSharedDomainsChange={onSharedDomainsChange}
                 allRules={rules}
                 allProviders={providers}
                 probeLocations={probeLocations}
@@ -1687,13 +1865,16 @@ function findRuleDomainConflict(rule, provider, domains, allRules, allProviders)
   return "";
 }
 
-function RuleBlock({ rule, provider, allRules, allProviders, probeLocations, probing, saving, setSaving, failoverOverride, domainHealthMap, onDeleteRule, onDomainsChange, showToast, setPageError, t }) {
+function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsChange, allRules, allProviders, probeLocations, probing, saving, setSaving, failoverOverride, domainHealthMap, onDeleteRule, onDomainsChange, showToast, setPageError, t }) {
   const [domainInput, setDomainInput] = useState("");
   const [changingLocation, setChangingLocation] = useState(false);
   const [newLocation, setNewLocation] = useState("");
   const fileInputRef = useRef(null);
   const selectedNewLocation = probeLocations?.find((loc) => loc.name === newLocation);
   const newLocationEndpointError = selectedNewLocation?.endpointError || "";
+  const sharedOrder = sharedDomains?.ruleIds?.indexOf(rule.id) ?? -1;
+  const usesSharedDomains = sharedOrder >= 0;
+  const sharedPrimary = sharedDomains?.ruleIds?.find((id) => allRules.some((item) => item.enabled && item.id === id));
 
   async function applyLocationChange() {
     if (!newLocation || newLocation === rule.selectedLocation) {
@@ -1848,7 +2029,9 @@ function RuleBlock({ rule, provider, allRules, allProviders, probeLocations, pro
         <div className="flex items-center gap-2 min-w-0">
           <Icon name="location_on" className="h-4 w-4 shrink-0 text-primary" />
           <span className="font-headline text-sm font-bold text-on-surface">{rule.selectedLocation || rule.name}</span>
-          <span className="text-xs text-on-surface-variant shrink-0">· {rule.domains.length} {t("connections.domainsFor")}</span>
+          <span className="text-xs text-on-surface-variant shrink-0">
+            · {usesSharedDomains ? (sharedDomains.entries?.length ?? 0) : rule.domains.length} {t("connections.domainsFor")}
+          </span>
           <button
             type="button"
             onClick={() => { setChangingLocation((v) => !v); setNewLocation(rule.selectedLocation || ""); }}
@@ -1929,7 +2112,23 @@ function RuleBlock({ rule, provider, allRules, allProviders, probeLocations, pro
         </div>
       )}
 
-      <form onSubmit={addDomains} className="mb-3 space-y-2">
+      {sharedDomains && provider.type === "subscription" && (
+        <label className="mb-3 flex flex-wrap items-center gap-2 text-sm text-on-surface">
+          <input
+            type="checkbox"
+            checked={usesSharedDomains}
+            disabled={saving || sharedBusy || (!rule.enabled && !usesSharedDomains)}
+            onChange={(event) => onSharedDomainsChange({ ruleId: rule.id, useShared: event.target.checked })}
+          />
+          {t("connections.useSharedList")}
+          {usesSharedDomains && (
+            <span className="text-on-surface-variant">
+              {t(rule.id === sharedPrimary ? "connections.sharedListPrimary" : "connections.sharedListReserve")}
+            </span>
+          )}
+        </label>
+      )}
+      {!usesSharedDomains && <form onSubmit={addDomains} className="mb-3 space-y-2">
         <textarea
           className="w-full resize-y rounded-lg border-none bg-surface-container-highest px-3 py-2 font-mono text-sm leading-relaxed text-on-surface placeholder:font-mono placeholder:text-on-surface-variant/80 focus:ring-1 focus:ring-primary"
           rows={4}
@@ -1975,9 +2174,9 @@ function RuleBlock({ rule, provider, allRules, allProviders, probeLocations, pro
           </button>
           <input ref={fileInputRef} type="file" accept=".txt,.csv,.lst,.list" className="hidden" onChange={handleFileImport} />
         </div>
-      </form>
+      </form>}
 
-      {rule.domains.length > 0 && (
+      {!usesSharedDomains && rule.domains.length > 0 && (
         <RuleDomainsPanel
           domains={rule.domains}
           saving={saving}

@@ -129,7 +129,8 @@ func (s *Supervisor) recoveryInterval(state config.State) time.Duration {
 }
 
 func (s *Supervisor) startup(ctx context.Context) {
-	if snapshot, err := s.status.RuntimeSnapshot(ctx); err == nil {
+	snapshot, snapshotErr := s.status.RuntimeSnapshot(ctx)
+	if snapshotErr == nil {
 		s.lastWAN = snapshot.WAN.State
 	}
 
@@ -146,7 +147,32 @@ func (s *Supervisor) startup(ctx context.Context) {
 	}
 	var applyErr error
 	if s.applyState != nil {
+		runtimeState := sharedDomainRoutingState(state)
+		decisions := defaultPriorityDecisions(runtimeState, time.Now())
+		seeded := false
+		if snapshotErr == nil {
+			for _, policy := range runtimeState.PriorityPolicies {
+				decision, enabled := decisions[policy.ID]
+				if !enabled || policy.RuleID == "" {
+					continue
+				}
+				if active := runningPriorityTarget(snapshot, policy.ProviderID, policy.Targets); active != "" {
+					decision.ActiveLocation = active
+					decisions[policy.ID] = decision
+					seeded = true
+				}
+			}
+		}
+		if seeded {
+			state = buildPriorityAppliedStateFromDecisions(runtimeState, decisions)
+		}
 		applyErr = s.applyState(ctx, state)
+		if applyErr == nil && seeded {
+			s.priorityMu.Lock()
+			s.priority.ensure()
+			s.priority.decisions = decisions
+			s.priorityMu.Unlock()
+		}
 	} else {
 		applyErr = s.apply(ctx)
 	}
@@ -179,6 +205,9 @@ func (s *Supervisor) tick(ctx context.Context) {
 	if !hasEnabledRules(state) {
 		return
 	}
+	if previousWAN != "" && snapshot.WAN.State == "up" && s.maybePriorityPolicies(ctx, state, snapshot) {
+		return
+	}
 	if state.Automation.AutoRecover {
 		runtimeState := s.failoverAppliedState(s.priorityAppliedState(state))
 		if openvpnRecoveryNeeded(runtimeState, snapshot.OpenVPNRuntime) || subscriptionRecoveryNeeded(runtimeState, snapshot.SubscriptionRuntime) {
@@ -192,10 +221,6 @@ func (s *Supervisor) tick(ctx context.Context) {
 		}
 	}
 	if previousWAN == "" {
-		return
-	}
-
-	if snapshot.WAN.State == "up" && s.maybePriorityPolicies(ctx, state, snapshot) {
 		return
 	}
 
@@ -282,7 +307,7 @@ func expectedSubscriptionKeys(state config.State) map[string]struct{} {
 
 	expected := make(map[string]struct{})
 	for _, rule := range state.Rules {
-		if !rule.Enabled {
+		if !rule.Enabled || !ruleHasDomainsForFailover(rule) {
 			continue
 		}
 		provider, exists := providersByID[rule.ProviderID]

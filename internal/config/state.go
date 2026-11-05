@@ -39,6 +39,7 @@ type Rule struct {
 
 type PriorityPolicy struct {
 	ID         string                   `json:"id"`
+	RuleID     string                   `json:"ruleId,omitempty"`
 	ProviderID string                   `json:"providerId"`
 	Name       string                   `json:"name"`
 	Enabled    bool                     `json:"enabled"`
@@ -93,6 +94,7 @@ type UpdateSettings struct {
 type State struct {
 	Providers        []Provider         `json:"providers"`
 	Rules            []Rule             `json:"rules"`
+	SharedDomains    SharedDomainList   `json:"sharedDomains"`
 	PriorityPolicies []PriorityPolicy   `json:"priorityPolicies"`
 	Routing          RoutingSettings    `json:"routing"`
 	Automation       AutomationSettings `json:"automation"`
@@ -511,6 +513,7 @@ func ensureStateSchema(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS priority_policies (
 			id TEXT PRIMARY KEY,
 			provider_id TEXT NOT NULL,
+			rule_id TEXT NOT NULL DEFAULT '',
 			name TEXT NOT NULL,
 			enabled INTEGER NOT NULL,
 			position INTEGER NOT NULL,
@@ -584,6 +587,7 @@ func ensureStateSchema(db *sql.DB) error {
 	}
 
 	// Add columns if missing (existing databases).
+	_, _ = db.Exec(`ALTER TABLE priority_policies ADD COLUMN rule_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE routing_settings ADD COLUMN mss_clamp INTEGER NOT NULL DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE routing_settings ADD COLUMN mss_value INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE routing_settings ADD COLUMN dns_hijack INTEGER NOT NULL DEFAULT 1`)
@@ -709,9 +713,9 @@ func saveStateTx(tx *sql.Tx, state State) error {
 
 	for policyIndex, policy := range state.PriorityPolicies {
 		if _, err := tx.Exec(`
-			INSERT INTO priority_policies (id, provider_id, name, enabled, position)
-			VALUES (?, ?, ?, ?, ?)
-		`, policy.ID, policy.ProviderID, policy.Name, boolToInt(policy.Enabled), policyIndex); err != nil {
+			INSERT INTO priority_policies (id, provider_id, rule_id, name, enabled, position)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, policy.ID, policy.ProviderID, policy.RuleID, policy.Name, boolToInt(policy.Enabled), policyIndex); err != nil {
 			return err
 		}
 		if err := replacePriorityPolicyEntriesTx(tx, policy.ID, policy.Entries); err != nil {
@@ -768,10 +772,15 @@ func saveStateTx(tx *sql.Tx, state State) error {
 		return err
 	}
 
+	sharedDomains, err := json.Marshal(state.SharedDomains)
+	if err != nil {
+		return err
+	}
 	for key, value := range map[string]string{
 		"lastAppliedAt":      state.LastAppliedAt,
 		"lastError":          state.LastError,
 		"updatedAt":          state.UpdatedAt,
+		"sharedDomains":      string(sharedDomains),
 		"updateRepository":   state.Update.Repository,
 		"updateAssetPattern": state.Update.AssetPattern,
 	} {
@@ -925,7 +934,7 @@ func (m *Manager) loadUnlocked() (State, error) {
 	}
 
 	policyRows, err := m.db.Query(`
-		SELECT id, provider_id, name, enabled
+		SELECT id, provider_id, rule_id, name, enabled
 		FROM priority_policies
 		ORDER BY position ASC, rowid ASC
 	`)
@@ -937,7 +946,7 @@ func (m *Manager) loadUnlocked() (State, error) {
 	for policyRows.Next() {
 		var policy PriorityPolicy
 		var enabled int
-		if err := policyRows.Scan(&policy.ID, &policy.ProviderID, &policy.Name, &enabled); err != nil {
+		if err := policyRows.Scan(&policy.ID, &policy.ProviderID, &policy.RuleID, &policy.Name, &enabled); err != nil {
 			return State{}, err
 		}
 		policy.Enabled = intToBool(enabled)
@@ -1040,6 +1049,10 @@ func (m *Manager) loadUnlocked() (State, error) {
 			state.LastError = value
 		case "updatedAt":
 			state.UpdatedAt = value
+		case "sharedDomains":
+			if err := json.Unmarshal([]byte(value), &state.SharedDomains); err != nil {
+				return State{}, err
+			}
 		case "updateRepository":
 			state.Update.Repository = value
 		case "updateAssetPattern":
@@ -1162,6 +1175,7 @@ func loadPriorityPolicySchedule(db *sql.DB) (map[string][]PriorityScheduleWindow
 func normalize(state State) State {
 	state.Providers = normalizeProviders(state.Providers)
 	state.Rules = normalizeRules(state.Rules)
+	state.SharedDomains = normalizeSharedDomainList(state.SharedDomains, state.Rules)
 	state.PriorityPolicies = normalizePriorityPolicies(state.PriorityPolicies)
 	state.Routing = normalizeRoutingSettings(state.Routing)
 	state.Automation = normalizeAutomationSettings(state.Automation)
@@ -1220,6 +1234,7 @@ func normalizePriorityPolicies(policies []PriorityPolicy) []PriorityPolicy {
 	for _, policy := range policies {
 		policy.ID = strings.TrimSpace(policy.ID)
 		policy.ProviderID = strings.TrimSpace(policy.ProviderID)
+		policy.RuleID = strings.TrimSpace(policy.RuleID)
 		policy.Name = strings.TrimSpace(policy.Name)
 		policy.Entries = normalizeDomains(policy.Entries)
 		policy.Targets = normalizePriorityTargets(policy.Targets)

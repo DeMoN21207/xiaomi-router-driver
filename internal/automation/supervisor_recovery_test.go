@@ -72,9 +72,12 @@ func TestTickAcceptsRunningPriorityDefaultRuntime(t *testing.T) {
 	state.Automation.AutoRecover = true
 	state.Automation.ProviderFailover = false
 	state.Providers = []config.Provider{{ID: "vpn", Name: "VPN", Type: config.ProviderTypeSubscription, Enabled: true}}
-	state.Rules = []config.Rule{{ID: "rule", Name: "Rule", ProviderID: "vpn", SelectedLocation: "Netherlands", Domains: []string{"example.com"}, Enabled: true}}
+	state.Rules = []config.Rule{
+		{ID: "rule", Name: "Rule", ProviderID: "vpn", SelectedLocation: "Netherlands", Domains: []string{"example.com"}, Enabled: true},
+		{ID: "empty", Name: "Empty reserve", ProviderID: "vpn", SelectedLocation: "Sweden", Enabled: true},
+	}
 	state.PriorityPolicies = []config.PriorityPolicy{{
-		ID: "priority", ProviderID: "vpn", Name: "Priority", Enabled: true,
+		ID: "priority", RuleID: "rule", ProviderID: "vpn", Name: "Priority", Enabled: true,
 		Targets: []config.PriorityTarget{{Location: "Germany"}, {Location: "Netherlands"}},
 	}}
 	if _, err := manager.Save(state); err != nil {
@@ -99,5 +102,49 @@ func TestTickAcceptsRunningPriorityDefaultRuntime(t *testing.T) {
 
 	if applied != 0 {
 		t.Fatalf("priority default runtime triggered %d recovery applies, want 0", applied)
+	}
+}
+
+func TestTickSelectsHealthyReserveBeforeRecoveringMissingPrimary(t *testing.T) {
+	db, err := sqlitedb.Open(filepath.Join(t.TempDir(), "vpn-manager.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := config.NewManager(db, "")
+	state := config.DefaultState()
+	state.Automation.AutoRecover = true
+	state.Automation.ProviderFailover = false
+	state.Automation.FailoverFailureSeconds = 15
+	state.Providers = []config.Provider{{ID: "vpn", Name: "VPN", Type: config.ProviderTypeSubscription, Enabled: true}}
+	state.Rules = []config.Rule{{ID: "rule", Name: "Rule", ProviderID: "vpn", SelectedLocation: "Germany", Domains: []string{"api.deepseek.com"}, Enabled: true}}
+	state.PriorityPolicies = []config.PriorityPolicy{{
+		ID: "priority", RuleID: "rule", ProviderID: "vpn", Name: "Priority", Enabled: true,
+		Targets: []config.PriorityTarget{{Location: "Germany"}, {Location: "Sweden"}},
+	}}
+	if _, err := manager.Save(state); err != nil {
+		t.Fatal(err)
+	}
+
+	var applied []config.Rule
+	supervisor := NewSupervisor(manager, recoveryStatusFixture{
+		snapshot: status.Snapshot{WAN: status.WANStatus{State: "up"}},
+	}, func(context.Context) error { return nil }, func(_ context.Context, next config.State) error {
+		applied = next.Rules
+		return nil
+	}, nil, t.TempDir())
+	supervisor.lastWAN = "up"
+	supervisor.priority.decisions["priority"] = priorityDecision{ProviderID: "vpn", ActiveLocation: "Germany", Mode: "provider"}
+	supervisor.priority.health[priorityHealthKey("priority", "Germany")] = providerHealthState{
+		UnhealthySince: time.Now().Add(-time.Minute), ConsecutiveFailures: 5,
+	}
+	supervisor.probeStandby = func(_ context.Context, _ config.Provider, location string) providerProbeResult {
+		return providerProbeResult{Healthy: location == "Sweden", Location: location}
+	}
+
+	supervisor.tick(t.Context())
+
+	if len(applied) != 1 || applied[0].SelectedLocation != "Sweden" {
+		t.Fatalf("expected missing primary to switch to Sweden, got %+v", applied)
 	}
 }
