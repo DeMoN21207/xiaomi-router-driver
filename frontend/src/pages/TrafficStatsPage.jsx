@@ -1276,7 +1276,7 @@ function DeviceHistoryChart({ chart, history, device, range, t }) {
               </div>
               <div className="mt-1 border-t border-outline-variant/10 pt-1">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-[10px] text-outline">{t("trafficStats.historyRangeTotal")}</span>
+                  <span className="text-[10px] text-outline">{t("trafficStats.historyBucketTotal")}</span>
                   <span className="font-mono text-xs font-bold text-on-surface">{formatBytes(point.bytes || 0)}</span>
                 </div>
               </div>
