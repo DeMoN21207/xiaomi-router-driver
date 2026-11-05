@@ -119,8 +119,7 @@ func validateSharedDomainRoutes(state config.State) error {
 		locations[location] = true
 	}
 	for _, policy := range state.PriorityPolicies {
-		if policy.Enabled && policy.ProviderID == providerID &&
-			(policy.RuleID == "" || (policy.RuleID != routes[0].ID && slices.Contains(state.SharedDomains.RuleIDs, policy.RuleID))) {
+		if policy.Enabled && policy.ProviderID == providerID && policy.RuleID == "" {
 			return errors.New("a separate priority policy already controls a shared route")
 		}
 	}

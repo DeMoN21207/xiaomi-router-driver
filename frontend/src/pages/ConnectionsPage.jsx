@@ -1,6 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { applyRules, fetchJSON, refreshSubscription as requestSubscriptionRefresh } from "../api.js";
-import { collectConnectionDomains, sharedDomainPriorityStatus } from "../connectionDomains.js";
+import SharedDomainEditor from "../components/SharedDomainEditor.jsx";
+import { activeConnectionRoutes } from "../connectionDomains.js";
 import { parseDomainInput } from "../domainInput.js";
 import { useI18n } from "../i18n.jsx";
 import Icon from "../components/Icon.jsx";
@@ -9,7 +10,6 @@ import { formatLatencyMs, statusToneClasses } from "../utils.js";
 
 const defaultForm = { name: "", type: "openvpn", source: "", enabled: true };
 const defaultPriorityDraft = { name: "", enabled: true, targets: [], schedule: [] };
-const DOMAIN_PREVIEW_LIMIT = 80;
 const DOMAIN_SEARCH_RESULT_LIMIT = 200;
 const ROUTING_ENTRIES_EXAMPLE = "# Example routing entries\n# Lines starting with # are ignored\n# Domains, IPv4 addresses and IPv4 CIDR ranges are supported\n\nyoutube.com\ngooglevideo.com\ndiscord.com\ngateway.discord.gg\n149.154.160.0/20\n91.108.56.0/22\n";
 
@@ -409,7 +409,7 @@ export default function ConnectionsPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="min-w-0 space-y-8 overflow-x-clip">
       <header className="flex flex-col justify-between gap-6 md:flex-row md:items-end">
         <div>
           <h1 className="font-headline text-4xl font-bold tracking-tight text-on-surface">{t("connections.title")}</h1>
@@ -418,34 +418,8 @@ export default function ConnectionsPage() {
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={() => {
-              const allDomains = [];
-              for (const rule of rules) {
-                const provider = providers.find((p) => p.id === rule.providerId);
-                const label = rule.selectedLocation || rule.name || "unknown";
-                const provName = provider?.name || "";
-                allDomains.push(`# ${provName} — ${label} (${rule.domains.length})`);
-                for (const d of rule.domains) allDomains.push(d);
-                allDomains.push("");
-              }
-              if (allDomains.length === 0) return;
-              const blob = new Blob([allDomains.join("\n") + "\n"], { type: "text/plain" });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = "all-domains-export.txt";
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-            className="flex items-center gap-2 rounded-xl border border-outline-variant/20 bg-surface-container-high px-5 py-3 font-headline text-sm font-medium text-on-surface transition-colors hover:bg-surface-variant"
-          >
-            <Icon name="download" className="h-4 w-4 text-primary" />
-            {t("connections.exportAll")}
-          </button>
-          <button
-            type="button"
             onClick={() => setShowForm((value) => !value)}
-            className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-primary to-primary-container px-6 py-3 font-bold text-on-primary shadow-lg shadow-primary/10 transition-all hover:brightness-110 active:scale-95"
+            className="flex items-center gap-2 rounded-lg bg-primary px-5 py-3 text-sm font-semibold text-on-primary transition-colors hover:bg-primary/90"
           >
             <Icon name={showForm ? "close" : "add"} className="h-5 w-5" />
             {showForm ? t("connections.close") : t("connections.add")}
@@ -566,21 +540,11 @@ export default function ConnectionsPage() {
       {sharedDomains && (
         <SharedDomainEditor
           list={sharedDomains}
-          activeLocation={sharedDomainPriorityStatus(sharedDomains, rules, priorityPolicies, priorityStatusMap)?.activeLocation}
           busy={busy}
           onSave={saveSharedDomains}
           t={t}
         />
       )}
-      <SharedDomainsPanel
-        rules={rules.map((rule) => {
-          if (!rule.enabled || !sharedDomains?.ruleIds?.includes(rule.id)) return rule;
-          const primary = sharedDomains.ruleIds.find((id) => rules.some((item) => item.enabled && item.id === id));
-          return { ...rule, domains: rule.id === primary ? (sharedDomains.entries || []) : [] };
-        })}
-        providers={providers}
-        t={t}
-      />
 
       <div className="space-y-6">
         {providers.map((provider) => {
@@ -651,136 +615,6 @@ export default function ConnectionsPage() {
 }
 
 
-function SharedDomainEditor({ list, activeLocation, busy, onSave, t }) {
-  const [draft, setDraft] = useState(null);
-  const entries = list.entries || [];
-
-  return (
-    <section aria-labelledby="shared-domain-editor" className="space-y-3 rounded-2xl bg-surface-container-low p-4 sm:p-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 id="shared-domain-editor" className="font-headline text-lg font-bold text-on-surface">
-          {t("connections.sharedList")} ({entries.length})
-        </h2>
-        {draft === null && (
-          <button
-            type="button"
-            onClick={() => setDraft(entries.join("\n"))}
-            disabled={busy}
-            className="rounded-lg bg-primary/10 px-3 py-2 text-sm font-medium text-primary"
-          >
-            {t("connections.editSharedList")}
-          </button>
-        )}
-      </div>
-      <p className="text-sm text-on-surface-variant">{t("connections.sharedListHelp")}</p>
-      {activeLocation && <p className="text-sm text-on-surface">{t("connections.sharedListActive", { location: activeLocation })}</p>}
-      {draft !== null && (
-        <form
-          className="space-y-2"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            if (await onSave({ entries: parseDomainInput(draft) })) setDraft(null);
-          }}
-        >
-          <textarea
-            aria-label={t("connections.sharedList")}
-            placeholder={t("connections.domainsPlaceholder")}
-            className="w-full resize-y rounded-lg bg-surface-container-highest p-3 font-mono text-sm"
-            rows={5}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            disabled={busy}
-          />
-          <button type="submit" disabled={busy} className="rounded-lg bg-primary/10 px-3 py-2 text-sm font-medium text-primary">
-            {t("connections.prioritySave")}
-          </button>
-          <button type="button" disabled={busy} onClick={() => setDraft(null)} className="px-3 py-2 text-sm">
-            {t("connections.cancel")}
-          </button>
-        </form>
-      )}
-    </section>
-  );
-}
-
-function SharedDomainsPanel({ rules, providers, t }) {
-  const [query, setQuery] = useState("");
-  const [limit, setLimit] = useState(DOMAIN_PREVIEW_LIMIT);
-  const entries = useMemo(() => collectConnectionDomains(rules), [rules]);
-  const providerById = useMemo(() => new Map(providers.map((provider) => [provider.id, provider])), [providers]);
-  const normalizedQuery = useDeferredValue(query.trim().toLowerCase());
-  const matches = useMemo(
-    () => entries.filter(({ entry }) => entry.toLowerCase().includes(normalizedQuery)),
-    [entries, normalizedQuery],
-  );
-
-  if (entries.length === 0) return null;
-
-  return (
-    <section aria-labelledby="shared-domains-title" className="space-y-3 rounded-2xl bg-surface-container-low p-4 sm:p-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 id="shared-domains-title" className="font-headline text-lg font-bold text-on-surface">
-          {t("connections.sharedDomains")} <span className="text-sm text-on-surface-variant">({entries.length})</span>
-        </h2>
-        <input
-          type="search"
-          aria-label={t("connections.sharedDomainsSearch")}
-          placeholder={t("connections.sharedDomainsSearch")}
-          value={query}
-          onChange={(event) => {
-            setQuery(event.target.value);
-            setLimit(DOMAIN_PREVIEW_LIMIT);
-          }}
-          className="w-full rounded-lg bg-surface-container-highest px-3 py-2 text-sm text-on-surface focus:ring-1 focus:ring-primary sm:w-64"
-        />
-      </div>
-      {matches.length === 0 ? (
-        <p className="text-sm text-on-surface-variant">{t("connections.sharedDomainsNoMatches")}</p>
-      ) : (
-        <div className="max-h-80 overflow-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="sticky top-0 bg-surface-container-low text-on-surface-variant">
-              <tr>
-                <th scope="col" className="px-3 py-2">{t("connections.sharedDomainsEntry")}</th>
-                <th scope="col" className="px-3 py-2">{t("connections.sharedDomainsRoute")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {matches.slice(0, limit).map(({ entry, rules: entryRules }) => (
-                <tr key={entry} className="border-t border-outline-variant/20 align-top">
-                  <td className="break-all px-3 py-2 font-mono text-on-surface">{entry}</td>
-                  <td className="px-3 py-2 text-on-surface-variant">
-                    <ul className="space-y-1">
-                      {entryRules.map((rule) => {
-                        const provider = providerById.get(rule.providerId);
-                        const disabled = rule.enabled === false || provider?.enabled === false;
-                        return (
-                          <li key={rule.id}>
-                            {formatRuleConflictLabel(rule, provider)}
-                            {disabled ? ` · ${t("connections.off")}` : ""}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {matches.length > limit && (
-        <button
-          type="button"
-          onClick={() => setLimit((previous) => previous + DOMAIN_PREVIEW_LIMIT)}
-          className="rounded-lg bg-surface-container-high px-3 py-2 text-sm font-semibold text-on-surface"
-        >
-          {t("connections.sharedDomainsMore", { remaining: matches.length - limit })}
-        </button>
-      )}
-    </section>
-  );
-}
 
 function formatFailoverSummary(overrides, t) {
   if (!Array.isArray(overrides) || overrides.length === 0) {
@@ -823,7 +657,11 @@ function ProviderCard({ provider, providers, rules, toneClasses, statusLabel, is
   const [newRouteLoc, setNewRouteLoc] = useState("");
   const probedRef = useRef(false);
 
-  const totalDomains = providerRules.reduce((sum, r) => sum + r.domains.length, 0);
+  const totalDomains = new Set([
+    ...providerRules.flatMap((rule) => rule.domains),
+    ...(providerRules.some((rule) => sharedDomains?.ruleIds?.includes(rule.id)) ? sharedDomains.entries || [] : []),
+  ]).size;
+  const activeRoutes = activeConnectionRoutes(provider.id, sharedDomains, rules, priorityPolicies, priorityStatusMap);
   const refreshingSubscription = provider.type === "subscription" && refreshingProviderId === provider.id;
   const providerActionBusy = Boolean(refreshingProviderId);
 
@@ -926,88 +764,104 @@ function ProviderCard({ provider, providers, rules, toneClasses, statusLabel, is
   const newRouteEndpointError = selectedNewRoute?.endpointError || "";
 
   return (
-    <div className="overflow-hidden rounded-xl border border-transparent bg-surface-container-low shadow-xl transition-all duration-300 hover:border-primary/20">
-      <div className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+    <div className="overflow-hidden rounded-2xl border border-outline-variant/20 bg-surface-container-low">
+      <div className="flex flex-wrap items-center justify-between gap-5 p-5 sm:p-6">
         <button
           type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-4 rounded-xl px-1 py-1 text-left transition-colors hover:bg-surface-container/50 max-sm:grid-cols-1"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          aria-controls={`provider-${provider.id}`}
+          className="flex min-w-0 flex-1 items-start gap-4 text-left"
         >
-          <div className="min-w-0">
-            <h3 className="truncate font-headline text-lg font-bold text-primary">{provider.name}</h3>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <span className="rounded bg-surface-container-highest px-2 py-0.5 font-mono text-[10px] text-on-primary-container">
-                {t(`common.${provider.type}`)}
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"><Icon name="vpn_lock" className="h-5 w-5" /></span>
+          <span className="min-w-0">
+            <span className="flex flex-wrap items-center gap-3">
+              <span className="font-headline text-xl font-bold tracking-tight text-on-surface">{provider.name}</span>
+              <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${toneClasses.text || "text-on-surface-variant"}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${toneClasses.dot}`} />{statusLabel}
               </span>
-              {providerRules.length > 0 && (
-                <span className="rounded bg-surface-container-highest px-2 py-0.5 text-[10px] text-on-surface-variant">
-                  {providerRules.length} {t("connections.routes")} · {totalDomains} {t("connections.domainsFor")}
-                </span>
-              )}
-              {providerRules.map((rule) => rule.selectedLocation && (
-                <span key={rule.id} className="flex items-center gap-1 rounded bg-primary/10 px-2 py-0.5 text-[10px] text-primary">
-                  <Icon name="location_on" className="h-3 w-3" />
-                  {rule.selectedLocation}
-                </span>
-              ))}
-              {failoverProvider && failoverProvider.status !== "unknown" ? (
-                <span className="rounded bg-surface-container-highest px-2 py-0.5 text-[10px] text-on-surface-variant">
-                  {t("connections.failoverHealth")}: {failoverProvider.status}
-                  {failoverProvider.score > 0 ? ` · ${failoverProvider.score}` : ""}
-                </span>
-              ) : null}
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center justify-end gap-3 max-sm:justify-between">
-            <span className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest ${toneClasses.badge}`}>
-              <span className={`h-2 w-2 rounded-full ${toneClasses.dot} ${isOnline ? "status-glow-success" : ""}`} />
-              {statusLabel}
             </span>
-            <Icon name={expanded ? "expand_less" : "expand_more"} className="h-5 w-5 text-outline-variant" />
-          </div>
+            <span className="mt-1.5 block text-xs text-on-surface-variant">
+              {t(`common.${provider.type}`)} · {t("connections.serverSummary", { servers: providerRules.length, entries: totalDomains })}
+            </span>
+            {provider.enabled && activeRoutes.length > 0 && (
+              <span className="mt-3 block space-y-1 text-xs text-on-surface-variant">
+                {activeRoutes.map((route) => <span key={route.id} className="block">{route.shared ? t("connections.sharedList") : route.name}: <span className="font-medium text-on-surface">{route.location}</span></span>)}
+              </span>
+            )}
+          </span>
+          <Icon name={expanded ? "expand_less" : "expand_more"} className="ml-auto mt-1 h-5 w-5 shrink-0 text-on-surface-variant" />
         </button>
-
-        <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_6.375rem_2.25rem] items-start gap-2 lg:grid-cols-[12.3125rem_6.375rem_2.25rem] lg:pt-1">
-          {provider.type === "subscription" ? (
-            <button
-              type="button"
-              onClick={onRefreshSubscription}
-              disabled={busy || saving || providerActionBusy}
-              className="flex min-h-9 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-primary/20 bg-primary/10 px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-primary transition-colors hover:bg-primary/15 disabled:opacity-40 max-sm:text-[11px] max-sm:tracking-normal"
-              title={t("connections.refreshSubscription")}
-            >
+        <div className="flex w-full flex-wrap items-center justify-end gap-3 border-t border-outline-variant/15 pt-4 sm:w-auto sm:border-0 sm:pt-0">
+          {provider.type === "subscription" && (
+            <button type="button" onClick={onRefreshSubscription} disabled={busy || saving || providerActionBusy} className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-on-surface-variant transition-colors hover:bg-surface-container-high disabled:opacity-40">
               <Icon name="sync" className={`h-4 w-4 ${refreshingSubscription ? "animate-spin" : ""}`} />
               {refreshingSubscription ? t("connections.refreshingSubscription") : t("connections.refreshSubscription")}
             </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => onToggleEnabled(!provider.enabled)}
-            disabled={busy || saving || providerActionBusy}
-            className={`min-h-9 w-full whitespace-nowrap rounded-full border px-3 py-1.5 text-center text-xs font-bold uppercase tracking-wide transition-colors disabled:opacity-40 ${
-              provider.enabled
-                ? "border-secondary/30 bg-secondary/10 text-secondary hover:bg-secondary/15"
-                : "border-outline-variant/20 bg-surface-container-highest text-on-surface-variant hover:border-primary/30 hover:text-on-surface"
-            }`}
-            title={provider.enabled ? t("connections.disableProvider") : t("connections.enableProvider")}
-          >
+          )}
+          <button type="button" role="switch" aria-checked={provider.enabled} aria-label={provider.enabled ? t("connections.disableProvider") : t("connections.enableProvider")} onClick={() => onToggleEnabled(!provider.enabled)} disabled={busy || saving || providerActionBusy} className="inline-flex items-center gap-2 py-2 text-sm text-on-surface-variant disabled:opacity-40">
+            <span className={`relative h-5 w-9 rounded-full transition-colors ${provider.enabled ? "bg-secondary" : "bg-outline-variant/50"}`}><span className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform motion-reduce:transition-none ${provider.enabled ? "translate-x-4" : "translate-x-0"}`} /></span>
             {provider.enabled ? t("connections.providerActive") : t("connections.providerInactive")}
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            disabled={busy || saving || providerActionBusy}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-outline-variant/20 text-on-surface-variant transition-colors hover:border-error/30 hover:bg-error-container/20 hover:text-error disabled:opacity-40"
-            title={t("common.deleteProvider")}
-          >
-            <Icon name="delete" className="h-4 w-4" />
           </button>
         </div>
       </div>
 
       {/* Expanded */}
       {expanded && (
-        <div className="border-t border-outline-variant/10 p-5 pt-4">
+        <div id={`provider-${provider.id}`} className="border-t border-outline-variant/20 p-4 sm:p-6">
+          {/* Rules (routes) — each with its own location + domains */}
+          <div className="space-y-4">
+            {providerRules.length === 0 && (
+              <p className="text-sm text-on-surface-variant">{t("connections.noRoutes")}</p>
+            )}
+            {providerRules.map((rule) => (
+              <RuleBlock
+                key={rule.id}
+                rule={rule}
+                provider={provider}
+                sharedDomains={sharedDomains}
+                sharedBusy={busy}
+                onSharedDomainsChange={onSharedDomainsChange}
+                probeLocations={probeLocations}
+                probing={probing}
+                saving={saving}
+                setSaving={setSaving}
+                failoverOverride={failoverOverrides?.get(rule.id)}
+                domainHealthMap={domainHealthMap}
+                onDeleteRule={() => deleteRule(rule.id)}
+                onDomainsChange={onDomainsChange}
+                showToast={showToast}
+                setPageError={setPageError}
+                t={t}
+              />
+            ))}
+          </div>
+
+          <details className="mt-5 border-t border-outline-variant/20 pt-4">
+            <summary className="cursor-pointer text-sm font-medium text-on-surface">{t("connections.priorityPolicies")}</summary>
+            <div className="mt-4">
+          {provider.type === "subscription" && (
+            <PriorityPoliciesPanel
+              provider={provider}
+              providerRules={providerRules}
+              policies={priorityPolicies}
+              priorityStatusMap={priorityStatusMap}
+              probeLocations={probeLocations}
+              probing={probing}
+              saving={saving}
+              setSaving={setSaving}
+              onChanged={onDomainsChange}
+              showToast={showToast}
+              setPageError={setPageError}
+              t={t}
+            />
+          )}
+
+            </div>
+          </details>
+          <details className="mt-4 border-t border-outline-variant/20 pt-4">
+            <summary className="cursor-pointer text-sm font-medium text-on-surface">{t("connections.subscriptionSettings")}</summary>
+            <div className="mt-4">
           {/* Source info */}
           <div className="mb-5">
             <span className="mb-1 block text-[10px] uppercase tracking-widest text-on-surface-variant">{t("connections.source")}</span>
@@ -1135,52 +989,8 @@ function ProviderCard({ provider, providers, rules, toneClasses, statusLabel, is
             </div>
           )}
 
-          {provider.type === "subscription" && (
-            <PriorityPoliciesPanel
-              provider={provider}
-              providerRules={providerRules}
-              policies={priorityPolicies}
-              priorityStatusMap={priorityStatusMap}
-              probeLocations={probeLocations}
-              probing={probing}
-              saving={saving}
-              setSaving={setSaving}
-              onChanged={onDomainsChange}
-              showToast={showToast}
-              setPageError={setPageError}
-              t={t}
-            />
-          )}
-
-          {/* Rules (routes) — each with its own location + domains */}
-          <div className="space-y-4">
-            {providerRules.length === 0 && (
-              <p className="text-sm text-on-surface-variant">{t("connections.noRoutes")}</p>
-            )}
-            {providerRules.map((rule) => (
-              <RuleBlock
-                key={rule.id}
-                rule={rule}
-                provider={provider}
-                sharedDomains={sharedDomains}
-                sharedBusy={busy}
-                onSharedDomainsChange={onSharedDomainsChange}
-                allRules={rules}
-                allProviders={providers}
-                probeLocations={probeLocations}
-                probing={probing}
-                saving={saving}
-                setSaving={setSaving}
-                failoverOverride={failoverOverrides?.get(rule.id)}
-                domainHealthMap={domainHealthMap}
-                onDeleteRule={() => deleteRule(rule.id)}
-                onDomainsChange={onDomainsChange}
-                showToast={showToast}
-                setPageError={setPageError}
-                t={t}
-              />
-            ))}
-          </div>
+            </div>
+          </details>
 
           {/* Delete provider */}
           <div className="mt-4 flex justify-end border-t border-outline-variant/10 pt-4">
@@ -1423,15 +1233,12 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, priorityStat
                           className={`rounded-lg border px-2.5 py-1 text-xs transition-colors disabled:opacity-40 ${targetActive ? "border-primary/30 bg-primary/10 text-primary" : "border-outline-variant/15 bg-surface-container-highest text-on-surface-variant hover:border-primary/25 hover:text-on-surface"}`}
                         >
                           {index + 1}. {target.location}
-                          {targetStatus?.status && targetStatus.status !== "unknown" ? ` · ${targetStatus.status}` : ""}
+                          {targetStatus?.status === "healthy" ? ` · ${t("connections.serverAvailable")}` : targetStatus?.status === "unhealthy" ? ` · ${t("connections.serverUnavailable")}` : ""}
                         </button>
                       );
                     })}
                   </div>
-                  <p className="mt-2 text-xs text-on-surface-variant">
-                    {providerEntryCount} {t("connections.priorityEntries")} · {(policy.schedule || []).length} {t("connections.priorityWindows")}
-                    {status?.reason ? ` · ${status.reason}` : ""}
-                  </p>
+                  {status?.reason && <details className="mt-3 text-xs text-on-surface-variant"><summary className="cursor-pointer">{t("connections.routingDetails")}</summary><p className="mt-2 break-words font-mono">{status.reason}</p></details>}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {override ? (
@@ -1439,10 +1246,10 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, priorityStat
                       {t("connections.priorityClearOverride")}
                     </button>
                   ) : null}
-                  <button type="button" onClick={() => startEdit(policy)} disabled={saving || editing} className="rounded-lg bg-surface-container-highest p-2 text-on-surface-variant transition-colors hover:text-primary disabled:opacity-40">
+                  <button type="button" aria-label={t("connections.editPriority", { name: policy.name })} onClick={() => startEdit(policy)} disabled={saving || editing} className="rounded-lg bg-surface-container-highest p-2 text-on-surface-variant transition-colors hover:text-primary disabled:opacity-40">
                     <Icon name="edit" className="h-4 w-4" />
                   </button>
-                  <button type="button" onClick={() => deletePolicy(policy)} disabled={saving || editing} className="rounded-lg bg-surface-container-highest p-2 text-on-surface-variant transition-colors hover:text-error disabled:opacity-40">
+                  <button type="button" aria-label={t("connections.deletePriority", { name: policy.name })} onClick={() => deletePolicy(policy)} disabled={saving || editing} className="rounded-lg bg-surface-container-highest p-2 text-on-surface-variant transition-colors hover:text-error disabled:opacity-40">
                     <Icon name="delete" className="h-4 w-4" />
                   </button>
                 </div>
@@ -1816,56 +1623,8 @@ function formatLocationType(type) {
   return normalized;
 }
 
-function formatRuleConflictLabel(rule, provider) {
-  const location = String(rule?.selectedLocation || "").trim();
-  const name = location || String(rule?.name || "").trim();
-  const providerName = String(provider?.name || "").trim();
 
-  if (providerName && name) {
-    return `${providerName} / ${name}`;
-  }
-  if (providerName) {
-    return providerName;
-  }
-  if (name) {
-    return name;
-  }
-  if (rule?.id) {
-    return String(rule.id);
-  }
-  return "unknown route";
-}
-
-function findRuleDomainConflict(rule, provider, domains, allRules, allProviders) {
-  if (!rule?.enabled || !provider?.enabled) {
-    return "";
-  }
-
-  const providersById = new Map((allProviders || []).map((item) => [item.id, item]));
-  const candidateDomains = new Set((domains || []).filter(Boolean));
-  if (candidateDomains.size === 0) {
-    return "";
-  }
-
-  for (const existing of allRules || []) {
-    if (!existing?.enabled || existing.id === rule.id) {
-      continue;
-    }
-    const existingProvider = providersById.get(existing.providerId);
-    if (!existingProvider?.enabled) {
-      continue;
-    }
-    for (const domain of existing.domains || []) {
-      if (candidateDomains.has(domain)) {
-        return `entry "${domain}" is already assigned to "${formatRuleConflictLabel(existing, existingProvider)}" and cannot also be used in "${formatRuleConflictLabel(rule, provider)}"`;
-      }
-    }
-  }
-
-  return "";
-}
-
-function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsChange, allRules, allProviders, probeLocations, probing, saving, setSaving, failoverOverride, domainHealthMap, onDeleteRule, onDomainsChange, showToast, setPageError, t }) {
+function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsChange, probeLocations, probing, saving, setSaving, failoverOverride, domainHealthMap, onDeleteRule, onDomainsChange, showToast, setPageError, t }) {
   const [domainInput, setDomainInput] = useState("");
   const [changingLocation, setChangingLocation] = useState(false);
   const [newLocation, setNewLocation] = useState("");
@@ -1874,7 +1633,6 @@ function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsC
   const newLocationEndpointError = selectedNewLocation?.endpointError || "";
   const sharedOrder = sharedDomains?.ruleIds?.indexOf(rule.id) ?? -1;
   const usesSharedDomains = sharedOrder >= 0;
-  const sharedPrimary = sharedDomains?.ruleIds?.find((id) => allRules.some((item) => item.enabled && item.id === id));
 
   async function applyLocationChange() {
     if (!newLocation || newLocation === rule.selectedLocation) {
@@ -1907,13 +1665,6 @@ function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsC
   }
 
   async function saveDomains(merged) {
-    const conflict = findRuleDomainConflict(rule, provider, merged, allRules, allProviders);
-    if (conflict) {
-      setPageError(conflict);
-      showToast(conflict, true);
-      return;
-    }
-
     setSaving(true);
     try {
       await fetchJSON(`/api/rules/${encodeURIComponent(rule.id)}?apply=1`, {
@@ -1956,49 +1707,12 @@ function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsC
   }
 
   async function removeDomain(domain) {
-    setSaving(true);
-    try {
-      const remaining = rule.domains.filter((d) => d !== domain);
-      if (remaining.length === 0) {
-        await fetchJSON(`/api/rules/${encodeURIComponent(rule.id)}?apply=1`, { method: "DELETE" });
-      } else {
-        await fetchJSON(`/api/rules/${encodeURIComponent(rule.id)}?apply=1`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: rule.name, providerId: provider.id, selectedLocation: rule.selectedLocation, domains: remaining.join(","), enabled: rule.enabled }),
-        });
-      }
-      await onDomainsChange();
-    } catch (error) {
-      setPageError(error.message);
-      showToast(error.message, true);
-    } finally {
-      setSaving(false);
-    }
+    await saveDomains(rule.domains.filter((entry) => entry !== domain));
   }
 
   async function removeDomains(domainsToRemove) {
-    setSaving(true);
-    try {
-      const removeSet = new Set(domainsToRemove);
-      const remaining = rule.domains.filter((d) => !removeSet.has(d));
-      if (remaining.length === 0) {
-        await fetchJSON(`/api/rules/${encodeURIComponent(rule.id)}?apply=1`, { method: "DELETE" });
-      } else {
-        await fetchJSON(`/api/rules/${encodeURIComponent(rule.id)}?apply=1`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: rule.name, providerId: provider.id, selectedLocation: rule.selectedLocation, domains: remaining.join(","), enabled: rule.enabled }),
-        });
-      }
-      await onDomainsChange();
-      showToast(t("connections.deletedCount", { count: String(domainsToRemove.length) }));
-    } catch (error) {
-      setPageError(error.message);
-      showToast(error.message, true);
-    } finally {
-      setSaving(false);
-    }
+    const removeSet = new Set(domainsToRemove);
+    await saveDomains(rule.domains.filter((entry) => !removeSet.has(entry)));
   }
 
   async function checkDomainsHealth(domainsToCheck) {
@@ -2024,14 +1738,11 @@ function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsC
   }
 
   return (
-    <div className="rounded-lg border border-outline-variant/10 bg-surface-container p-4">
-      <div className="mb-3 flex items-center justify-between">
+    <section aria-label={rule.selectedLocation || rule.name} className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-4 sm:p-5">
+      <div className="mb-4 flex items-start justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
           <Icon name="location_on" className="h-4 w-4 shrink-0 text-primary" />
-          <span className="font-headline text-sm font-bold text-on-surface">{rule.selectedLocation || rule.name}</span>
-          <span className="text-xs text-on-surface-variant shrink-0">
-            · {usesSharedDomains ? (sharedDomains.entries?.length ?? 0) : rule.domains.length} {t("connections.domainsFor")}
-          </span>
+          <span className="min-w-0 break-words font-headline text-base font-semibold text-on-surface">{rule.selectedLocation || rule.name}</span>
           <button
             type="button"
             onClick={() => { setChangingLocation((v) => !v); setNewLocation(rule.selectedLocation || ""); }}
@@ -2113,31 +1824,40 @@ function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsC
       )}
 
       {sharedDomains && provider.type === "subscription" && (
-        <label className="mb-3 flex flex-wrap items-center gap-2 text-sm text-on-surface">
+        <label className="mb-5 flex cursor-pointer items-start gap-3 rounded-lg bg-surface-container px-3 py-3 text-sm text-on-surface">
           <input
             type="checkbox"
             checked={usesSharedDomains}
             disabled={saving || sharedBusy || (!rule.enabled && !usesSharedDomains)}
             onChange={(event) => onSharedDomainsChange({ ruleId: rule.id, useShared: event.target.checked })}
+            className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
           />
-          {t("connections.useSharedList")}
-          {usesSharedDomains && (
-            <span className="text-on-surface-variant">
-              {t(rule.id === sharedPrimary ? "connections.sharedListPrimary" : "connections.sharedListReserve")}
-            </span>
-          )}
+          <span>
+            <span className="block font-medium">{t("connections.useSharedList")} <span className="font-normal text-on-surface-variant">({sharedDomains.entries?.length ?? 0})</span></span>
+            <span className="mt-0.5 block text-xs text-on-surface-variant">{t(usesSharedDomains ? "connections.sharedAndOwn" : "connections.ownOnly")}</span>
+          </span>
         </label>
       )}
-      {!usesSharedDomains && <form onSubmit={addDomains} className="mb-3 space-y-2">
+      <details>
+      <summary className="cursor-pointer text-sm font-semibold text-on-surface">{t("connections.ownDomains")} <span className="ml-1 font-normal text-on-surface-variant">({rule.domains.length})</span></summary>
+      <p className="mt-2 mb-3 text-xs text-on-surface-variant">{t("connections.ownDomainsHelp")}</p>
+      {rule.domains.length > 0 && <ul className="mb-4 max-h-40 space-y-1 overflow-auto" aria-label={t("connections.ownDomains")}>
+        {rule.domains.map((domain) => <li key={domain} className="flex items-center justify-between gap-3 border-b border-outline-variant/15 py-1.5 text-sm">
+          <span className="break-all font-mono text-xs text-on-surface">{domain}</span>
+          <button type="button" onClick={() => removeDomain(domain)} disabled={saving} aria-label={t("connections.removeDomain", { domain })} className="shrink-0 rounded p-1.5 text-on-surface-variant hover:bg-error/10 hover:text-error disabled:opacity-40"><Icon name="close" className="h-4 w-4" /></button>
+        </li>)}
+      </ul>}
+      <form onSubmit={addDomains} className="mb-3 space-y-2">
         <textarea
+          aria-label={`${t("connections.ownDomains")}: ${rule.selectedLocation || rule.name}`}
           className="w-full resize-y rounded-lg border-none bg-surface-container-highest px-3 py-2 font-mono text-sm leading-relaxed text-on-surface placeholder:font-mono placeholder:text-on-surface-variant/80 focus:ring-1 focus:ring-primary"
-          rows={4}
+          rows={3}
           value={domainInput}
           onChange={(e) => setDomainInput(e.target.value)}
           placeholder={t("connections.domainsPlaceholder")}
           disabled={saving}
         />
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             type="submit"
             disabled={saving || !domainInput.trim()}
@@ -2174,9 +1894,12 @@ function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsC
           </button>
           <input ref={fileInputRef} type="file" accept=".txt,.csv,.lst,.list" className="hidden" onChange={handleFileImport} />
         </div>
-      </form>}
+      </form>
 
-      {!usesSharedDomains && rule.domains.length > 0 && (
+      {rule.domains.length > 0 && (
+        <details className="mt-4 border-t border-outline-variant/15 pt-3">
+        <summary className="cursor-pointer text-xs text-on-surface-variant">{t("connections.domainTools")}</summary>
+        <div className="mt-3">
         <RuleDomainsPanel
           domains={rule.domains}
           saving={saving}
@@ -2195,22 +1918,15 @@ function RuleBlock({ rule, provider, sharedDomains, sharedBusy, onSharedDomainsC
           }}
           onClearAll={async () => {
             if (!window.confirm(t("connections.clearAllConfirm"))) return;
-            setSaving(true);
-            try {
-              await fetchJSON(`/api/rules/${encodeURIComponent(rule.id)}?apply=1`, { method: "DELETE" });
-              await onDomainsChange();
-              showToast(t("connections.domainsCleared"));
-            } catch (error) {
-              setPageError(error.message);
-              showToast(error.message, true);
-            } finally {
-              setSaving(false);
-            }
+            await saveDomains([]);
           }}
           t={t}
         />
+        </div>
+        </details>
       )}
-    </div>
+      </details>
+    </section>
   );
 }
 

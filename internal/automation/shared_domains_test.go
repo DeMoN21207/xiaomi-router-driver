@@ -46,6 +46,13 @@ func TestSharedDomainsUseOnePrimaryAndKeepIndependentRoute(t *testing.T) {
 	if shared != 1 || deepseek != 1 {
 		t.Fatalf("expected one shared route and unchanged DeepSeek route: %+v", applied.Rules)
 	}
+	for _, entry := range []string{"own-a.test", "own-b.test"} {
+		if !slices.ContainsFunc(applied.Rules, func(rule config.Rule) bool {
+			return rule.Enabled && rule.SelectedLocation == "B" && slices.Contains(rule.Domains, entry)
+		}) {
+			t.Fatalf("own entry %q disappeared during shared failover: %+v", entry, applied.Rules)
+		}
+	}
 	if expected := expectedSubscriptionKeys(applied); len(expected) != 2 {
 		t.Fatalf("only the active backup and independent route should need a tunnel: %v", expected)
 	}

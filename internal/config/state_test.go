@@ -436,13 +436,90 @@ func TestSharedDomainListPersistsWithoutOverwritingOwnEntries(t *testing.T) {
 		t.Fatalf("unexpected saved shared list: %+v", loaded.SharedDomains)
 	}
 	effective := loaded.EffectiveRules()
-	if !slices.Equal(effective[0].Domains, []string{"shared.test"}) || len(effective[1].Domains) != 0 {
-		t.Fatalf("expected the shared list only on the primary route: %+v", effective)
+	if !slices.Equal(effective[0].Domains, []string{"own.test", "shared.test"}) ||
+		!slices.Equal(effective[1].Domains, []string{"reserve.test"}) || !effective[1].Enabled {
+		t.Fatalf("expected shared entries on the primary and own entries on both routes: %+v", effective)
 	}
 	loaded.SharedDomains.RuleIDs = nil
 	restored := loaded.EffectiveRules()
 	if !slices.Equal(restored[0].Domains, []string{"own.test"}) || !slices.Equal(restored[1].Domains, []string{"reserve.test"}) {
 		t.Fatalf("expected the original lists after disabling shared mode: %+v", restored)
+	}
+}
+
+func TestSharedDomainsMergeWithoutDuplicatesOrMutatingSavedLists(t *testing.T) {
+	state := State{
+		Rules: []Rule{
+			{ID: "main", Domains: []string{"own.test", "shared.test"}, Enabled: true},
+			{ID: "empty-backup", Enabled: true},
+			{ID: "independent", Domains: []string{"api.deepseek.com"}, Enabled: true},
+		},
+		SharedDomains: SharedDomainList{Entries: []string{"shared.test", "192.0.2.0/24"}, RuleIDs: []string{"main", "empty-backup"}},
+	}
+	effective := state.EffectiveRules()
+	if !slices.Equal(effective[0].Domains, []string{"own.test", "shared.test", "192.0.2.0/24"}) {
+		t.Fatalf("shared and own lists must form one deduplicated list: %+v", effective[0])
+	}
+	if effective[1].Enabled || len(effective[1].Domains) != 0 {
+		t.Fatalf("an empty backup must not start a separate tunnel: %+v", effective[1])
+	}
+	if !effective[2].Enabled || !slices.Equal(effective[2].Domains, []string{"api.deepseek.com"}) {
+		t.Fatalf("independent custom-only route changed: %+v", effective[2])
+	}
+	effective[0].Domains[0] = "changed.test"
+	if !slices.Equal(state.Rules[0].Domains, []string{"own.test", "shared.test"}) || state.SharedDomains.Entries[0] != "shared.test" {
+		t.Fatal("effective lists alias saved lists")
+	}
+}
+
+func TestSharedDomainsDeduplicateLegacyOwnListsInMemberOrder(t *testing.T) {
+	state := State{
+		Rules: []Rule{
+			{ID: "main", Domains: []string{"own.test"}, Enabled: true},
+			{ID: "first-backup", Domains: []string{"shared.test", "backup.test"}, Enabled: true},
+			{ID: "second-backup", Domains: []string{"shared.test", "backup.test", "unique.test"}, Enabled: true},
+		},
+		SharedDomains: SharedDomainList{Entries: []string{"shared.test"}, RuleIDs: []string{"main", "first-backup", "second-backup"}},
+	}
+	effective := state.EffectiveRules()
+	if !slices.Equal(effective[0].Domains, []string{"own.test", "shared.test"}) ||
+		!slices.Equal(effective[1].Domains, []string{"backup.test"}) ||
+		!slices.Equal(effective[2].Domains, []string{"unique.test"}) {
+		t.Fatalf("legacy copies of shared/own entries must have one effective owner: %+v", effective)
+	}
+	if len(state.Rules[2].Domains) != 3 {
+		t.Fatal("deduplication changed the saved own list")
+	}
+}
+
+func TestSharedDomainsKeepUncoveredIPRangesOnReserve(t *testing.T) {
+	state := State{
+		Rules: []Rule{
+			{ID: "main", Enabled: true},
+			{ID: "backup", Domains: []string{"192.0.2.0/24", "198.51.100.12", "unique.test"}, Enabled: true},
+		},
+		SharedDomains: SharedDomainList{Entries: []string{"192.0.2.0/25", "198.51.100.0/24"}, RuleIDs: []string{"main", "backup"}},
+	}
+	effective := state.EffectiveRules()
+	if !slices.Equal(effective[1].Domains, []string{"192.0.2.128/25", "unique.test"}) {
+		t.Fatalf("the reserve must retain only the uncovered IP range and own domain: %+v", effective[1])
+	}
+	if !slices.Equal(state.Rules[1].Domains, []string{"192.0.2.0/24", "198.51.100.12", "unique.test"}) {
+		t.Fatal("CIDR subtraction changed the saved list")
+	}
+}
+
+func TestSharedDomainsCoverOnlySubdomainsAtLabelBoundaries(t *testing.T) {
+	state := State{
+		Rules: []Rule{
+			{ID: "main", Enabled: true},
+			{ID: "backup", Domains: []string{"api.example.com", "notexample.com", "other.test"}, Enabled: true},
+		},
+		SharedDomains: SharedDomainList{Entries: []string{"example.com", "api.other.test"}, RuleIDs: []string{"main", "backup"}},
+	}
+	effective := state.EffectiveRules()
+	if !slices.Equal(effective[1].Domains, []string{"notexample.com", "other.test"}) {
+		t.Fatalf("parent domains must cover subdomains without hiding unrelated or broader domains: %+v", effective[1])
 	}
 }
 
