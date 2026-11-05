@@ -193,6 +193,9 @@ export default function ConnectionsPage() {
   const [form, setForm] = useState(defaultForm);
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [prioritySelection, setPrioritySelection] = useState(null);
+  const [prioritySelectionError, setPrioritySelectionError] = useState(null);
+  const prioritySelectionLock = useRef(false);
   const [pageError, setPageError] = useState("");
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
@@ -298,6 +301,32 @@ export default function ConnectionsPage() {
     }, 15_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [section]);
+
+  async function changePriorityServer(policy, location) {
+    if (prioritySelectionLock.current || busy || !policy.enabled) return;
+    prioritySelectionLock.current = true;
+    setBusy(true);
+    setPrioritySelection({ policyId: policy.id, location });
+    setPrioritySelectionError(null);
+    try {
+      await fetchJSON(`/api/priority-policies/${encodeURIComponent(policy.id)}/override`, {
+        method: location === null ? "DELETE" : "POST",
+        ...(location === null ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ location }) }),
+        timeoutMs: 150_000,
+      });
+      await refresh();
+      showToast(t(location === null ? "connections.priorityOverrideCleared" : "connections.locationUpdated"));
+    } catch (error) {
+      setPrioritySelectionError({ policyId: policy.id, message: error.message });
+      setPageError(error.message);
+      showToast(error.message, true);
+      await refresh();
+    } finally {
+      prioritySelectionLock.current = false;
+      setPrioritySelection(null);
+      setBusy(false);
+    }
+  }
 
   async function saveSharedDomains(change) {
     setBusy(true);
@@ -631,6 +660,9 @@ export default function ConnectionsPage() {
               providerRules={providerRules}
               priorityPolicies={providerPriorityPolicies}
               priorityStatusMap={priorityStatusMap}
+              prioritySelection={prioritySelection}
+              prioritySelectionError={prioritySelectionError}
+              onPriorityServerChange={changePriorityServer}
               busy={busy}
               sharedDomains={sharedDomains}
               onSharedDomainsChange={saveSharedDomains}
@@ -708,7 +740,7 @@ function formatFailoverOverrideMessage(override, t) {
   return t("connections.failoverProvider", { from: original || override.originalProviderId || "-", to: active || override.activeProviderId || "-" });
 }
 
-function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provider, providers, rules, toneClasses, statusLabel, isOnline, providerRules, priorityPolicies, priorityStatusMap, busy, sharedDomains, onSharedDomainsChange, failoverOverrides, failoverProvider, domainHealthMap, onDelete, onToggleEnabled, onRefreshSubscription, refreshingProviderId, onDomainsChange, showToast, setPageError, t }) {
+function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provider, providers, rules, toneClasses, statusLabel, isOnline, providerRules, priorityPolicies, priorityStatusMap, prioritySelection, prioritySelectionError, onPriorityServerChange, busy, sharedDomains, onSharedDomainsChange, failoverOverrides, failoverProvider, domainHealthMap, onDelete, onToggleEnabled, onRefreshSubscription, refreshingProviderId, onDomainsChange, showToast, setPageError, t }) {
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
   const [refreshingLatency, setRefreshingLatency] = useState(false);
@@ -945,7 +977,10 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
               livePings={livePings}
               probeLocations={probeLocations}
               probing={probing}
-              saving={saving}
+              pendingSelection={prioritySelection}
+              selectionError={prioritySelectionError}
+              onSelectServer={onPriorityServerChange}
+              saving={saving || busy}
               setSaving={setSaving}
               onChanged={onDomainsChange}
               showToast={showToast}
@@ -1104,7 +1139,7 @@ function ProviderCard({ mode, selectedRuleId, onSelectRule, onEditRoute, provide
   );
 }
 
-function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomains, priorityStatusMap, livePings, probeLocations, probing, saving, setSaving, onChanged, showToast, setPageError, t }) {
+function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomains, priorityStatusMap, livePings, probeLocations, probing, pendingSelection, selectionError, onSelectServer, saving, setSaving, onChanged, showToast, setPageError, t }) {
   const [editingId, setEditingId] = useState("");
   const [draft, setDraft] = useState(defaultPriorityDraft);
   const [newTarget, setNewTarget] = useState("");
@@ -1238,6 +1273,7 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
         <div>
           <h3 className="font-headline text-base font-semibold text-on-surface">{t("connections.priorityPolicies")}</h3>
           <p className="mt-1 text-sm text-on-surface-variant">{t("connections.priorityHint")}</p>
+          <p className="mt-2 text-xs text-on-surface-variant">{t("connections.priorityClickHelp")}</p>
         </div>
         {!editing && <button
           type="button"
@@ -1261,12 +1297,14 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
           const status = priorityStatusMap?.get(policy.id);
           const active = status?.activeLocation || "";
           const override = status?.overrideLocation || "";
+          const policyName = policy.ruleId === sharedPrimary ? t("connections.sharedList") : policy.name;
+          const changing = pendingSelection?.policyId === policy.id;
           return (
-            <div key={policy.id} className="rounded-lg border border-outline-variant/10 bg-surface-container-high p-3">
+            <div key={policy.id} role="group" aria-label={policyName} className="rounded-lg border border-outline-variant/10 bg-surface-container-high p-3">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-headline text-sm font-bold text-on-surface">{policy.ruleId === sharedPrimary ? t("connections.sharedList") : policy.name}</span>
+                    <span className="font-headline text-sm font-bold text-on-surface">{policyName}</span>
                     <span className="text-xs text-on-surface-variant">{t(policy.selectionMode === "latency" ? "connections.selectionByPing" : "connections.selectionByOrder")}</span>
                     <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${policy.enabled ? "bg-secondary/10 text-secondary" : "bg-outline-variant/10 text-outline"}`}>
                       {policy.enabled ? t("connections.priorityEnabled") : t("connections.priorityDisabled")}
@@ -1286,18 +1324,27 @@ function PriorityPoliciesPanel({ provider, providerRules, policies, sharedDomain
                     {(policy.targets || []).map((target, index) => {
                       const targetStatus = status?.targets?.find((item) => item.location === target.location);
                       const targetActive = active === target.location;
+                      const targetPending = changing && pendingSelection.location === target.location;
                       return (
-                        <span
+                        <button
                           key={`${policy.id}:${target.location}`}
-                          className={`rounded-lg border px-2.5 py-1 text-xs transition-colors disabled:opacity-40 ${targetActive ? "border-primary/30 bg-primary/10 text-primary" : "border-outline-variant/15 bg-surface-container-highest text-on-surface-variant hover:border-primary/25 hover:text-on-surface"}`}
+                          type="button"
+                          aria-label={t("connections.switchPolicyServer", { name: policyName, server: target.location })}
+                          aria-pressed={targetActive}
+                          aria-busy={targetPending}
+                          disabled={saving || !policy.enabled}
+                          onClick={() => onSelectServer(policy, target.location)}
+                          className={`cursor-pointer rounded-lg border px-2.5 py-1 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-container-high disabled:cursor-default disabled:opacity-40 ${targetActive ? "border-primary/30 bg-primary/10 text-primary" : "border-outline-variant/15 bg-surface-container-highest text-on-surface-variant hover:border-primary/25 hover:text-on-surface"}`}
                         >
                           {index + 1}. {target.location}
                           {targetStatus?.status === "healthy" ? ` · ${t("connections.serverAvailable")}` : targetStatus?.status === "unhealthy" ? ` · ${t("connections.serverUnavailable")}` : ""}
-                          <span className="ml-2"><ServerPing target={livePings[target.location] || targetStatus} t={t} /></span>
-                        </span>
+                          {targetPending ? <span className="ml-2 inline-flex items-center gap-1" role="status"><Icon name="sync" className="h-3 w-3 animate-spin motion-reduce:animate-none" />{t("connections.switchingServer")}</span> : <span className="ml-2"><ServerPing target={livePings[target.location] || targetStatus} t={t} /></span>}
+                        </button>
                       );
                     })}
                   </div>
+                  {override ? <button type="button" aria-label={t("connections.returnPolicyToAuto", { name: policyName })} disabled={saving || !policy.enabled} onClick={() => onSelectServer(policy, null)} className="mt-3 inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 disabled:opacity-40">{changing && pendingSelection.location === null ? <><Icon name="sync" className="h-3 w-3 animate-spin motion-reduce:animate-none" /><span role="status">{t("connections.returningToAuto")}</span></> : t("connections.returnToAuto")}</button> : null}
+                  {selectionError?.policyId === policy.id ? <p role="alert" className="mt-2 text-sm text-error">{selectionError.message}</p> : null}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <button type="button" aria-label={t("connections.editPriority", { name: policy.name })} onClick={() => startEdit(policy)} disabled={saving || editing} className="rounded-lg bg-surface-container-highest p-2 text-on-surface-variant transition-colors hover:text-primary disabled:opacity-40">
