@@ -57,10 +57,23 @@ export function routingOverview(config, statusMap = new Map(), failoverMap = new
         targetStatuses: status?.targets || [],
         failover: Boolean(failover),
         unavailable: failover?.mode === "direct",
+        blocked: !failover && Boolean(status?.blocked),
+        locationIssue: !failover ? status?.locationIssue || "" : "",
       });
     }
   }
   return rows.sort((left, right) => Number(right.shared) - Number(left.shared));
+}
+
+export function prioritySelectionMessage(result, t) {
+  if (!result?.activeLocation) throw new Error(t("connections.priority_unconfirmed"));
+  const auto = result.status === "override_cleared";
+  return t(auto ? "connections.priorityAutomaticActive" : "connections.priorityManualActive", { location: result.activeLocation });
+}
+
+export function prioritySelectionError(error, t) {
+  if (error.code?.startsWith("priority_")) return t(`connections.${error.code}`, { detail: error.message });
+  return error.message;
 }
 
 export function serverSwitchRequest(row, location) {

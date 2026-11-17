@@ -142,21 +142,19 @@ func (s *Supervisor) maybeProviderFailover(ctx context.Context, state config.Sta
 }
 
 func (s *Supervisor) applyStateRespectingFailover(ctx context.Context, state config.State) error {
-	priorityState := s.priorityAppliedState(state)
-	hasPriorityDecisions := false
-	s.priorityMu.RLock()
-	hasPriorityDecisions = len(s.priority.decisions) > 0
-	s.priorityMu.RUnlock()
-
-	s.failoverMu.RLock()
-	appliedState := s.failoverAppliedStateLocked(priorityState)
-	hasOverrides := len(s.failover.overrides) > 0
-	s.failoverMu.RUnlock()
-
-	if s.applyState != nil && (hasOverrides || hasPriorityDecisions) {
-		return s.applyState(ctx, appliedState)
+	if s.applyState == nil {
+		return s.apply(ctx)
 	}
-	return s.apply(ctx)
+	appliedState := s.failoverAppliedState(s.priorityAppliedState(state))
+	ctx, report := subscription.WithApplyReport(ctx)
+	if err := s.applyState(ctx, appliedState); err != nil {
+		return err
+	}
+	s.noteDegradedTargets(appliedState, report)
+	s.priorityMu.Lock()
+	reconcilePriorityOutcomes(s.priority.decisions, report)
+	s.priorityMu.Unlock()
+	return nil
 }
 
 func (s *Supervisor) failoverAppliedState(state config.State) config.State {

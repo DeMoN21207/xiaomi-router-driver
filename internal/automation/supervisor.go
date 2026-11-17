@@ -46,6 +46,7 @@ type Supervisor struct {
 	probeCache   map[string]cachedProviderProbe
 
 	priorityEvalMu      sync.Mutex
+	degradedRetryAt     map[string]time.Time // protected by priorityEvalMu
 	priorityPingMu      sync.Mutex
 	failoverStatusCache atomic.Pointer[failoverStatusSnapshot]
 }
@@ -132,9 +133,14 @@ func (s *Supervisor) recoveryInterval(state config.State) time.Duration {
 }
 
 func (s *Supervisor) startup(ctx context.Context) {
+	s.priorityEvalMu.Lock()
+	defer s.priorityEvalMu.Unlock()
+
 	snapshot, snapshotErr := s.status.RuntimeSnapshot(ctx)
 	if snapshotErr == nil {
 		s.lastWAN = snapshot.WAN.State
+	} else {
+		snapshot = status.Snapshot{}
 	}
 
 	state, err := s.state.Load()
@@ -151,30 +157,18 @@ func (s *Supervisor) startup(ctx context.Context) {
 	var applyErr error
 	if s.applyState != nil {
 		runtimeState := sharedDomainRoutingState(state)
-		decisions := defaultPriorityDecisions(runtimeState, time.Now())
-		seeded := false
-		if snapshotErr == nil {
-			for _, policy := range runtimeState.PriorityPolicies {
-				decision, enabled := decisions[policy.ID]
-				if !enabled || policy.RuleID == "" {
-					continue
-				}
-				if active := runningPriorityTarget(snapshot, policy.ProviderID, policy.Targets); active != "" {
-					decision.ActiveLocation = active
-					decisions[policy.ID] = decision
-					seeded = true
-				}
-			}
-		}
-		if seeded {
-			state = buildPriorityAppliedStateFromDecisions(runtimeState, decisions)
-		}
-		applyErr = s.applyState(ctx, state)
-		if applyErr == nil && seeded {
+		decisions := s.startupPriorityDecisions(runtimeState, snapshot)
+		appliedState := buildPriorityAppliedStateFromDecisions(runtimeState, decisions)
+		applyCtx, report := subscription.WithApplyReport(ctx)
+		applyErr = s.applyState(applyCtx, appliedState)
+		if applyErr == nil {
+			s.noteDegradedTargets(appliedState, report)
+			reconcilePriorityOutcomes(decisions, report)
 			s.priorityMu.Lock()
 			s.priority.ensure()
 			s.priority.decisions = decisions
 			s.priorityMu.Unlock()
+			s.savePriorityTargets(runtimeState, appliedState, report)
 		}
 	} else {
 		applyErr = s.apply(ctx)
@@ -188,6 +182,10 @@ func (s *Supervisor) startup(ctx context.Context) {
 }
 
 func (s *Supervisor) tick(ctx context.Context) {
+	// A manual switch can replace both the active tunnel and its routes.
+	// Read and reconcile one runtime snapshot between completed switches.
+	s.priorityEvalMu.Lock()
+	defer s.priorityEvalMu.Unlock()
 	state, err := s.state.Load()
 	if err != nil {
 		s.record("error", "automation.reconcile_failed", fmt.Sprintf("load state: %v", err))
@@ -208,12 +206,14 @@ func (s *Supervisor) tick(ctx context.Context) {
 	if !hasEnabledRules(state) {
 		return
 	}
-	if previousWAN != "" && snapshot.WAN.State == "up" && s.maybePriorityPolicies(ctx, state, snapshot) {
-		return
+	if previousWAN != "" && snapshot.WAN.State == "up" {
+		if changed, _ := s.maybePriorityPoliciesLocked(ctx, state, snapshot, manualPrioritySelection{}); changed {
+			return
+		}
 	}
 	if state.Automation.AutoRecover {
 		runtimeState := s.failoverAppliedState(s.priorityAppliedState(state))
-		if openvpnRecoveryNeeded(runtimeState, snapshot.OpenVPNRuntime) || subscriptionRecoveryNeeded(runtimeState, snapshot.SubscriptionRuntime) {
+		if openvpnRecoveryNeeded(runtimeState, snapshot.OpenVPNRuntime) || s.subscriptionTargetsNeedRecovery(expectedSubscriptionKeys(runtimeState), snapshot.SubscriptionRuntime) {
 			if err := s.applyStateRespectingFailover(ctx, state); err != nil {
 				s.record("error", "automation.reconcile_failed", fmt.Sprintf("vpn runtime recovery failed: %v", err))
 				log.Printf("automation runtime recovery failed: %v", err)
@@ -281,25 +281,6 @@ func openvpnRecoveryNeeded(state config.State, snapshots []openvpn.RuntimeSnapsh
 	}
 
 	return true
-}
-
-func subscriptionRecoveryNeeded(state config.State, snapshots []subscription.RuntimeSnapshot) bool {
-	expected := expectedSubscriptionKeys(state)
-	if len(expected) == 0 {
-		return false
-	}
-
-	actual := make(map[string]string, len(snapshots))
-	for _, snapshot := range snapshots {
-		actual[snapshot.Key] = snapshot.Status
-	}
-
-	for key := range expected {
-		if actual[key] != "running" {
-			return true
-		}
-	}
-	return false
 }
 
 func expectedSubscriptionKeys(state config.State) map[string]struct{} {

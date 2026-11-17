@@ -63,7 +63,7 @@ func (m *Manager) prepareRollback(ctx context.Context, instances []*managedInsta
 		}
 		plan := applyPlan{
 			desired: desiredInstance{Key: instance.Key, Provider: config.Provider{ID: instance.ProviderID, Name: instance.ProviderName},
-				Location: instance.Location, Domains: entries},
+				Location: instance.Location, Domains: entries, LocationIssue: instance.LocationIssue},
 			settings: instance.Settings, configPath: instance.ConfigPath, configData: configData,
 			domainListPath: runtimeDomainListPath(instance.ConfigPath),
 		}

@@ -32,15 +32,16 @@ export async function fetchJSON(url, options) {
 		}
     if (response.ok) return await response.json();
 
-    let message = "Запрос завершился ошибкой";
+    const error = new Error("Запрос завершился ошибкой");
     try {
       const payload = await response.json();
-      message = payload.error || message;
+      error.message = payload.error || error.message;
+      if (typeof payload.code === "string") error.code = payload.code;
     } catch {
       // ignore malformed response body
     }
 
-    throw new Error(message);
+    throw error;
 	} finally {
 		if (timeoutId) clearTimeout(timeoutId);
 		if (abortHandler && options?.signal) options.signal.removeEventListener("abort", abortHandler);

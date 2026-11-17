@@ -174,7 +174,7 @@ func main() {
 	statusService.SetSharedDomainLocation(supervisor.SharedDomainLocation)
 	statusService.SetTrafficRules(supervisor.TrafficRules)
 	apiHandler.SetFailoverStatusProvider(supervisor.FailoverStatus)
-	apiHandler.SetPriorityRuntime(supervisor.PriorityStatus, supervisor.SetPriorityOverride, supervisor.ClearPriorityOverride, supervisor.ApplyPriorityPolicies)
+	apiHandler.SetPriorityRuntime(supervisor.PriorityStatus, supervisor.ApplyPriorityOverride, supervisor.ClearPriorityOverride)
 	var workers sync.WaitGroup
 	startWorker := func(run func(context.Context)) {
 		workers.Add(1)

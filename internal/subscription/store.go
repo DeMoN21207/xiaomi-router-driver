@@ -52,6 +52,7 @@ func ensureRuntimeSchema(db *sql.DB) error {
 			provider_id TEXT NOT NULL,
 			provider_name TEXT NOT NULL,
 			location TEXT NOT NULL,
+			location_issue TEXT NOT NULL DEFAULT '',
 			interface_name TEXT NOT NULL,
 			domain_count INTEGER NOT NULL,
 			config_path TEXT NOT NULL,
@@ -65,6 +66,14 @@ func ensureRuntimeSchema(db *sql.DB) error {
 		}
 	}
 
+	var hasIssue bool
+	if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM pragma_table_info('subscription_runtime_instances') WHERE name = 'location_issue')`).Scan(&hasIssue); err != nil {
+		return err
+	}
+	if !hasIssue {
+		_, err := db.Exec(`ALTER TABLE subscription_runtime_instances ADD COLUMN location_issue TEXT NOT NULL DEFAULT ''`)
+		return err
+	}
 	return nil
 }
 
@@ -119,7 +128,7 @@ func (m *Manager) migrateLegacyManifestLocked() error {
 
 func (m *Manager) loadInstancesLocked() ([]*managedInstance, error) {
 	rows, err := m.db.Query(`
-		SELECT key, provider_id, provider_name, location, interface_name, domain_count, config_path, settings_json, pid
+		SELECT key, provider_id, provider_name, location, location_issue, interface_name, domain_count, config_path, settings_json, pid
 		FROM subscription_runtime_instances
 		ORDER BY provider_name ASC, location ASC, key ASC
 	`)
@@ -152,6 +161,7 @@ func scanRuntimeInstance(scanner interface{ Scan(dest ...any) error }) (*managed
 		&instance.ProviderID,
 		&instance.ProviderName,
 		&instance.Location,
+		&instance.LocationIssue,
 		&instance.InterfaceName,
 		&instance.DomainCount,
 		&instance.ConfigPath,
@@ -187,18 +197,19 @@ func saveRuntimeInstance(writer interface {
 
 	_, err = writer.Exec(`
 		INSERT INTO subscription_runtime_instances (
-			key, provider_id, provider_name, location, interface_name, domain_count, config_path, settings_json, pid
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			key, provider_id, provider_name, location, location_issue, interface_name, domain_count, config_path, settings_json, pid
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET
 			provider_id = excluded.provider_id,
 			provider_name = excluded.provider_name,
 			location = excluded.location,
+			location_issue = excluded.location_issue,
 			interface_name = excluded.interface_name,
 			domain_count = excluded.domain_count,
 			config_path = excluded.config_path,
 			settings_json = excluded.settings_json,
 			pid = excluded.pid
-	`, instance.Key, instance.ProviderID, instance.ProviderName, instance.Location, instance.InterfaceName, instance.DomainCount, instance.ConfigPath, string(settingsJSON), instance.PID)
+	`, instance.Key, instance.ProviderID, instance.ProviderName, instance.Location, instance.LocationIssue, instance.InterfaceName, instance.DomainCount, instance.ConfigPath, string(settingsJSON), instance.PID)
 	return err
 }
 

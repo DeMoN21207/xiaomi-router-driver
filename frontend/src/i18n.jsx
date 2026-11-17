@@ -754,6 +754,9 @@ Object.assign(translations.ru, {
   "connections.fixedServer": "Задан в маршруте",
   "connections.waitingServer": "Состояние сервера уточняется",
   "connections.noVpnServer": "Нет доступного VPN-сервера",
+  "connections.routeBlocked": "Сервер недоступен. Трафик этого списка заблокирован. Можно выбрать другой сервер.",
+  "connections.routeRetained": "Выбранный сервер недоступен в подписке. Для этого списка сохранён прежний VPN-маршрут.",
+  "connections.routeUnconfirmed": "Роутер пока не подтвердил работающий VPN для этого списка.",
   "connections.switchServer": "Сменить сервер",
   "connections.configureServers": "Настроить серверы",
   "connections.configureRoute": "Настроить маршрут",
@@ -842,6 +845,9 @@ Object.assign(translations.en, {
   "connections.fixedServer": "Set in route",
   "connections.waitingServer": "Checking server state",
   "connections.noVpnServer": "No VPN server available",
+  "connections.routeBlocked": "The server is unavailable. Traffic for this list is blocked. You can select another server.",
+  "connections.routeRetained": "The selected server is unavailable in the subscription. This list keeps its previous VPN route.",
+  "connections.routeUnconfirmed": "The router has not confirmed a working VPN for this list yet.",
   "connections.switchServer": "Change server",
   "connections.configureServers": "Configure servers",
   "connections.configureRoute": "Configure route",
@@ -1670,6 +1676,14 @@ Object.assign(translations.ru, {
   "connections.priorityDeleted": "Политика приоритета удалена",
   "connections.priorityOverrideSet": "Ручной выбор применён",
   "connections.priorityOverrideCleared": "Ручной выбор сброшен",
+  "connections.priorityAutomaticActive": "Включён автоматический выбор. Активный сервер — {location}.",
+  "connections.priorityManualActive": "Активный сервер — {location}.",
+  "connections.priority_target_unavailable": "Выбранный сервер не прошёл проверку VPN. Выберите другой сервер или повторите позже.",
+  "connections.priority_provider_fallback": "Для этого маршрута действует резервирование провайдера. Переключение сервера станет доступно после восстановления основного маршрута.",
+  "connections.priority_unconfirmed": "Роутер не подтвердил применение выбранного маршрута. Проверьте состояние сервера.",
+  "connections.priority_unavailable": "Переключение недоступно. Проверьте подключение к интернету и настройки политики.",
+  "connections.priority_timeout": "Время ожидания переключения истекло. Проверьте активный сервер перед повторной попыткой.",
+  "connections.priority_apply_failed": "Не удалось применить маршрут. {detail}",
 });
 
 Object.assign(translations.en, {
@@ -1719,6 +1733,14 @@ Object.assign(translations.en, {
   "connections.priorityDeleted": "Priority policy deleted",
   "connections.priorityOverrideSet": "Manual selection applied",
   "connections.priorityOverrideCleared": "Manual selection cleared",
+  "connections.priorityAutomaticActive": "Automatic selection enabled. Active server: {location}.",
+  "connections.priorityManualActive": "Active server: {location}.",
+  "connections.priority_target_unavailable": "The selected server failed its VPN check. Choose another server or try again later.",
+  "connections.priority_provider_fallback": "Provider failover is active for this route. You can switch servers when the primary route recovers.",
+  "connections.priority_unconfirmed": "The router could not confirm the selected route. Check the server status.",
+  "connections.priority_unavailable": "Server selection is unavailable. Check the internet connection and policy settings.",
+  "connections.priority_timeout": "Server selection timed out. Check the active server before retrying.",
+  "connections.priority_apply_failed": "Could not apply the route. {detail}",
 });
 
 Object.assign(translations.ru, {

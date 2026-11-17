@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
+
 	"net/http"
 	"testing"
+	"xiomi-router-driver/internal/automation"
 
 	"xiomi-router-driver/internal/config"
 )
@@ -21,14 +24,13 @@ func TestSharedDefaultServerCanBeSwitchedWithoutPersistingSyntheticPolicy(t *tes
 		t.Fatal(err)
 	}
 	called := 0
-	handler.setPriorityOverride = func(id, location string) error {
+	handler.applyPriorityOverride = func(_ context.Context, id, location string) (string, error) {
 		if id != config.SharedDomainPolicyID || location != "Sweden" {
 			t.Fatalf("unexpected override: %s %s", id, location)
 		}
 		called++
-		return nil
+		return location, nil
 	}
-	handler.applyPriorityNow = func(context.Context) error { return nil }
 	path := "/api/priority-policies/" + config.SharedDomainPolicyID + "/override"
 	before, err := manager.Load()
 	if err != nil {
@@ -37,10 +39,37 @@ func TestSharedDefaultServerCanBeSwitchedWithoutPersistingSyntheticPolicy(t *tes
 	if _, ok := findRuntimePriorityPolicy(before, config.SharedDomainPolicyID); !ok {
 		t.Fatalf("synthetic policy unavailable: routes=%d shared=%d policies=%d", len(before.SharedDomainRoutes()), len(before.SharedDomains.Entries), len(before.PriorityPolicies))
 	}
-	_ = requestJSON[map[string]string](t, handler, http.MethodPost, path, map[string]string{"location": "Sweden"}, http.StatusOK)
+	result := requestJSON[map[string]string](t, handler, http.MethodPost, path, map[string]string{"location": "Sweden"}, http.StatusOK)
+	if result["status"] != "override_set" || result["activeLocation"] != "Sweden" {
+		t.Fatalf("incorrect selection response: %+v", result)
+	}
 	_ = requestJSON[map[string]string](t, handler, http.MethodPost, path, map[string]string{"location": "Unknown"}, http.StatusBadRequest)
 	if called != 1 {
 		t.Fatalf("override called %d times", called)
+	}
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{automation.ErrPriorityTargetUnavailable, http.StatusConflict, "priority_target_unavailable"},
+		{errors.New("route apply failed"), http.StatusInternalServerError, "priority_apply_failed"},
+	} {
+		handler.applyPriorityOverride = func(context.Context, string, string) (string, error) { return "", tc.err }
+		result := requestJSON[map[string]string](t, handler, http.MethodPost, path, map[string]string{"location": "Sweden"}, tc.status)
+		if result["code"] != tc.code || result["error"] == "" {
+			t.Fatalf("incorrect error response: %+v", result)
+		}
+	}
+	handler.applyPriorityOverride = func(_ context.Context, id, location string) (string, error) {
+		if location != "" {
+			t.Fatalf("clear sent location %q", location)
+		}
+		return "Latvia", nil
+	}
+	result = requestJSON[map[string]string](t, handler, http.MethodDelete, path, nil, http.StatusOK)
+	if result["status"] != "override_cleared" || result["activeLocation"] != "Latvia" {
+		t.Fatalf("clear result: %+v", result)
 	}
 	loaded, err := manager.Load()
 	if err != nil {

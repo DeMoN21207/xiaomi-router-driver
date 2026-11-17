@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"xiomi-router-driver/internal/domains"
 	"xiomi-router-driver/internal/probe"
 	"xiomi-router-driver/internal/status"
+	"xiomi-router-driver/internal/subscription"
 )
 
 const priorityApplyTimeout = 2 * time.Minute
@@ -30,15 +32,17 @@ type priorityDecision struct {
 	Reason            string
 	Since             time.Time
 	Fingerprint       string
+	outcome           subscription.RuleApplyResult
 }
 
 type priorityRuntime struct {
-	decisions    map[string]priorityDecision
-	overrides    map[string]priorityOverride
-	health       map[string]providerHealthState
-	pings        map[string]priorityServerPing
-	measurePings func(context.Context, []probe.Location) []probe.Location
-	lastApply    time.Time
+	decisions         map[string]priorityDecision
+	overrides         map[string]priorityOverride
+	health            map[string]providerHealthState
+	pings             map[string]priorityServerPing
+	measurePings      func(context.Context, []probe.Location) []probe.Location
+	lastApply         time.Time
+	reconcileRequired bool // guarded by priorityEvalMu after a failed or unconfirmed apply
 }
 
 func newPriorityRuntime() priorityRuntime {
@@ -79,6 +83,8 @@ type PriorityPolicyStatus struct {
 	SelectionMode     string                 `json:"selectionMode"`
 	ScheduledLocation string                 `json:"scheduledLocation,omitempty"`
 	ActiveLocation    string                 `json:"activeLocation,omitempty"`
+	LocationIssue     string                 `json:"locationIssue,omitempty"`
+	Blocked           bool                   `json:"blocked,omitempty"`
 	PreferredLocation string                 `json:"preferredLocation,omitempty"`
 	OverrideLocation  string                 `json:"overrideLocation,omitempty"`
 	Mode              string                 `json:"mode,omitempty"`
@@ -135,43 +141,71 @@ func (s *Supervisor) ClearPriorityOverride(policyID string) {
 	delete(s.priority.overrides, policyID)
 }
 
+var (
+	ErrPriorityUnavailable       = errors.New("priority routing is unavailable")
+	ErrPriorityTargetUnavailable = errors.New("selected server did not pass the VPN check")
+	ErrPriorityUnconfirmed       = errors.New("router did not confirm the selected route")
+	ErrPriorityProviderFallback  = errors.New("provider failover is active on this route")
+)
+
+type manualPrioritySelection struct {
+	policyID string
+	location string // Empty restores automatic selection.
+}
+
 func (s *Supervisor) ApplyPriorityPolicies(ctx context.Context) error {
-	if s.state == nil || s.status == nil {
-		return nil
+	_, err := s.applyPriorityRequest(ctx, manualPrioritySelection{})
+	return err
+}
+
+func (s *Supervisor) ApplyPriorityOverride(ctx context.Context, policyID, location string) (string, error) {
+	if strings.TrimSpace(policyID) == "" {
+		return "", ErrPriorityUnavailable
 	}
-	// Read inputs only after the previous application has published its runtime.
-	// Dashboard snapshots can deliberately remain stale while it is in progress.
+	return s.applyPriorityRequest(ctx, manualPrioritySelection{policyID, strings.TrimSpace(location)})
+}
+
+func (s *Supervisor) applyPriorityRequest(ctx context.Context, selection manualPrioritySelection) (string, error) {
 	s.priorityEvalMu.Lock()
 	defer s.priorityEvalMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
+	}
+	if s.state == nil || s.status == nil {
+		return "", ErrPriorityUnavailable
 	}
 	state, err := s.state.Load()
 	if err != nil {
-		return err
+		return "", err
 	}
 	snapshot, err := s.status.RuntimeSnapshot(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	s.maybePriorityPoliciesLocked(ctx, state, snapshot)
-	return nil
+	_, err = s.maybePriorityPoliciesLocked(ctx, state, snapshot, selection)
+	if err != nil || selection.policyID == "" {
+		return "", err
+	}
+	s.priorityMu.RLock()
+	defer s.priorityMu.RUnlock()
+	return s.priority.decisions[selection.policyID].ActiveLocation, nil
 }
 
 func (s *Supervisor) maybePriorityPolicies(ctx context.Context, state config.State, snapshot status.Snapshot) bool {
-	// Serialize decisions through application, without blocking status readers
-	// or manual selections on network probes and route updates.
 	s.priorityEvalMu.Lock()
 	defer s.priorityEvalMu.Unlock()
-	return s.maybePriorityPoliciesLocked(ctx, state, snapshot)
+	changed, _ := s.maybePriorityPoliciesLocked(ctx, state, snapshot, manualPrioritySelection{})
+	return changed
 }
 
-func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state config.State, snapshot status.Snapshot) bool {
-	if s.applyState == nil || snapshot.WAN.State != "up" || ctx.Err() != nil {
-		return false
+func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state config.State, snapshot status.Snapshot, selection manualPrioritySelection) (bool, error) {
+	if s.applyState == nil || snapshot.WAN.State != "up" {
+		return false, ErrPriorityUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	state = sharedDomainRoutingState(state)
-
 	now := time.Now()
 	s.priorityMu.Lock()
 	s.priority.ensure()
@@ -179,46 +213,142 @@ func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state conf
 	s.priorityMu.Unlock()
 
 	s.updatePriorityServerPings(ctx, state, now)
-	if ctx.Err() != nil {
-		return false
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	next := make(map[string]priorityDecision)
 	ctx = context.WithValue(ctx, priorityProbeCycleKey{}, &priorityProbeCycle{active: make(map[string]*priorityCycleProbe)})
 	for _, policy := range state.PriorityPolicies {
+		if policy.ID == selection.policyID {
+			decision, err := s.evaluateManualSelection(ctx, state, snapshot, policy, now, selection.location)
+			if err != nil {
+				return false, err
+			}
+			next[policy.ID] = decision
+			continue
+		}
 		decision, ok := s.evaluatePriorityPolicyLocked(ctx, state, snapshot, policy, now)
 		if ok {
 			next[decision.PolicyID] = decision
 		}
 	}
-
-	s.priorityMu.RLock()
-	needsApply := !samePriorityDecisionSet(s.priority.decisions, next)
-	s.priorityMu.RUnlock()
-	if !needsApply && !priorityRuntimeMatchesDecisions(snapshot, next) {
-		needsApply = true
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
-	if !needsApply {
+	manual := selection.policyID != ""
+	if _, ok := next[selection.policyID]; manual && !ok {
+		return false, ErrPriorityUnavailable
+	}
+	s.priorityMu.RLock()
+	needsApply := manual || s.priority.reconcileRequired || !samePriorityDecisionSet(s.priority.decisions, next)
+	s.priorityMu.RUnlock()
+	if !needsApply && s.priorityRuntimeMatchesDecisions(snapshot, next) {
 		s.priorityMu.Lock()
+		s.carryPriorityOutcomesLocked(next)
 		s.priority.decisions = next
 		s.priorityMu.Unlock()
-		return false
+		return false, nil
 	}
 
 	appliedState := buildPriorityAppliedStateFromDecisions(state, next)
+	routingState := appliedState
+	if manual {
+		s.failoverMu.RLock()
+		_, protected := s.failover.overrides[priorityRuleID(selection.policyID)]
+		routingState = applyFailoverOverrides(appliedState, s.failover.overrides)
+		s.failoverMu.RUnlock()
+		if protected {
+			return false, ErrPriorityProviderFallback
+		}
+	}
 	applyCtx, cancel := context.WithTimeout(ctx, priorityApplyTimeout)
-	err := s.applyState(applyCtx, appliedState)
+	applyCtx, report := subscription.WithApplyReport(applyCtx)
+	s.priority.reconcileRequired = true
+	err := s.applyState(applyCtx, routingState)
 	cancel()
 	if err != nil {
 		s.record("error", "automation.priority_apply_failed", fmt.Sprintf("apply priority policies failed: %v", err))
-		return false
+		return false, err
 	}
-
+	s.noteDegradedTargets(appliedState, report)
+	if manual {
+		if err := s.confirmManualSelection(ctx, next[selection.policyID], report); err != nil {
+			// The apply completed, but the selected rule may be blocked or retained.
+			// Publish that outcome without accepting the new preference.
+			s.priorityMu.Lock()
+			reconcilePriorityOutcomes(s.priority.decisions, report)
+			s.priorityMu.Unlock()
+			return false, err
+		}
+	}
+	s.priority.reconcileRequired = false
 	s.priorityMu.Lock()
+	reconcilePriorityOutcomes(next, report)
 	s.priority.decisions = next
+	if manual {
+		if selection.location == "" {
+			delete(s.priority.overrides, selection.policyID)
+		} else {
+			s.priority.overrides[selection.policyID] = priorityOverride{Location: next[selection.policyID].ActiveLocation, Since: now}
+		}
+	}
 	s.priority.lastApply = time.Now()
 	s.priorityMu.Unlock()
+	s.savePriorityTargets(state, appliedState, report)
 	s.record("info", "automation.priority_applied", formatPriorityApplyMessage(next))
-	return true
+	return true, nil
+}
+
+func (s *Supervisor) confirmManualSelection(ctx context.Context, decision priorityDecision, report *subscription.ApplyReport) error {
+	ruleID := priorityRuleID(decision.PolicyID)
+	actual, found := report.Rules[ruleID]
+	if !found || actual.Blocked || actual.Issue != "" || actual.ProviderID != decision.ProviderID || !strings.EqualFold(actual.Location, decision.ActiveLocation) {
+		return ErrPriorityUnconfirmed
+	}
+
+	snapshot, err := s.status.RuntimeSnapshot(ctx)
+	if err == nil {
+		key := decision.ProviderID + "::" + strings.ToLower(decision.ActiveLocation)
+		for _, item := range snapshot.SubscriptionRuntime {
+			if item.Key == key && item.Status == "running" && item.LocationIssue == "" {
+				return nil
+			}
+		}
+	}
+	actual.Location, actual.Issue = "", ErrPriorityUnconfirmed.Error()
+	report.Rules[ruleID] = actual
+	return errors.Join(ErrPriorityUnconfirmed, err)
+}
+
+func (s *Supervisor) evaluateManualSelection(ctx context.Context, state config.State, snapshot status.Snapshot, policy config.PriorityPolicy, now time.Time, location string) (priorityDecision, error) {
+	if len(priorityPolicyEntries(state, policy)) == 0 {
+		return priorityDecision{}, ErrPriorityUnavailable
+	}
+	var override priorityOverride
+	if location != "" {
+		for _, target := range policy.Targets {
+			if strings.EqualFold(target.Location, location) {
+				override = priorityOverride{Location: target.Location, Since: now}
+				break
+			}
+		}
+		if override.Location == "" {
+			return priorityDecision{}, ErrPriorityUnavailable
+		}
+	}
+	decision, ok := s.evaluatePriorityPolicy(ctx, state, snapshot, policy, now, override)
+	if !ok {
+		return priorityDecision{}, ErrPriorityUnavailable
+	}
+	if location != "" {
+		s.priorityMu.RLock()
+		health := s.priority.health[priorityHealthKey(policy.ID, override.Location)]
+		s.priorityMu.RUnlock()
+		if decision.ActiveLocation != override.Location || health.ConsecutiveFailures != 0 {
+			return priorityDecision{}, ErrPriorityTargetUnavailable
+		}
+	}
+	return decision, nil
 }
 
 func (s *Supervisor) priorityAppliedState(state config.State) config.State {
@@ -378,6 +508,21 @@ func (s *Supervisor) prunePriorityRuntimeLocked(state config.State, now time.Tim
 // The caller holds priorityEvalMu, not priorityMu: probes run without blocking
 // status reads or override updates, and shared runtime access uses short locks.
 func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state config.State, snapshot status.Snapshot, policy config.PriorityPolicy, now time.Time) (priorityDecision, bool) {
+	s.priorityMu.RLock()
+	override := s.priority.overrides[policy.ID]
+	s.priorityMu.RUnlock()
+	decision, ok := s.evaluatePriorityPolicy(ctx, state, snapshot, policy, now, override)
+	if ok && override.Location != "" && decision.ActiveLocation != override.Location {
+		s.priorityMu.Lock()
+		if s.priority.overrides[policy.ID] == override {
+			delete(s.priority.overrides, policy.ID)
+		}
+		s.priorityMu.Unlock()
+	}
+	return decision, ok
+}
+
+func (s *Supervisor) evaluatePriorityPolicy(ctx context.Context, state config.State, snapshot status.Snapshot, policy config.PriorityPolicy, now time.Time, override priorityOverride) (priorityDecision, bool) {
 	if !policy.Enabled || len(policy.Targets) == 0 {
 		return priorityDecision{}, false
 	}
@@ -391,7 +536,7 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 
 	preferred := preferredPriorityLocation(policy, now)
 	s.priorityMu.RLock()
-	override, hasOverride := s.priority.overrides[policy.ID]
+	hasOverride := override.Location != ""
 	previous := s.priority.decisions[policy.ID]
 	pings := make(map[string]priorityServerPing, len(policy.Targets))
 	for _, target := range policy.Targets {
@@ -480,7 +625,7 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 		healths[result.location] = s.updatePriorityTargetHealth(policy, provider, result.location, result.probe, now)
 	}
 	activeHealth := healths[previous.ActiveLocation]
-	activeProtected := previous.ActiveLocation != "" && (probes[previous.ActiveLocation].Healthy ||
+	activeProtected := !previous.outcome.Blocked && previous.ActiveLocation != "" && (probes[previous.ActiveLocation].Healthy ||
 		activeHealth.UnhealthySince.IsZero() || now.Sub(activeHealth.UnhealthySince) < failureThreshold || activeHealth.ConsecutiveFailures < failoverFailureStreak())
 	selected := ""
 	selectedProbe := providerProbeResult{}
@@ -498,8 +643,7 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 			health = s.updatePriorityTargetHealth(policy, provider, location, probe, now)
 		}
 		if !probe.Healthy {
-			if location == previous.ActiveLocation &&
-				(health.UnhealthySince.IsZero() || now.Sub(health.UnhealthySince) < failureThreshold || health.ConsecutiveFailures < failoverFailureStreak()) {
+			if location == previous.ActiveLocation && activeProtected {
 				selected = location
 				selectedProbe = probe
 				reason = "active target probe failed; waiting before fallback"
@@ -549,15 +693,6 @@ func (s *Supervisor) evaluatePriorityPolicyLocked(ctx context.Context, state con
 		reason = "all priority targets are unhealthy; keeping VPN route because direct internet release is disabled"
 	}
 
-	if hasOverride && selected != override.Location {
-		s.priorityMu.Lock()
-		// A manual selection can arrive while the previous target is probed.
-		// Only reject the override that this evaluation actually checked.
-		if current, exists := s.priority.overrides[policy.ID]; exists && current == override {
-			delete(s.priority.overrides, policy.ID)
-		}
-		s.priorityMu.Unlock()
-	}
 	if chooseByPing {
 		preferred = selected
 	}
@@ -583,6 +718,9 @@ func (s *Supervisor) priorityTargetProbe(ctx context.Context, state config.State
 		defer cancel()
 	}
 	if previous.ActiveLocation == location {
+		if previous.outcome.Blocked {
+			return providerProbeResult{Location: location, Detail: previous.outcome.Issue}
+		}
 		key := provider.ID + "::" + strings.ToLower(strings.TrimSpace(location))
 		foundRuntime := false
 		for _, item := range snapshot.SubscriptionRuntime {
@@ -869,24 +1007,16 @@ func samePriorityDecisionSet(left map[string]priorityDecision, right map[string]
 	return true
 }
 
-func priorityRuntimeMatchesDecisions(snapshot status.Snapshot, decisions map[string]priorityDecision) bool {
-	if len(decisions) == 0 {
-		return true
-	}
-	actual := make(map[string]string, len(snapshot.SubscriptionRuntime))
-	for _, item := range snapshot.SubscriptionRuntime {
-		actual[item.Key] = item.Status
-	}
+func (s *Supervisor) priorityRuntimeMatchesDecisions(snapshot status.Snapshot, decisions map[string]priorityDecision) bool {
+	expected := make(map[string]struct{}, len(decisions))
 	for _, decision := range decisions {
 		if decision.Mode == "direct" || decision.ActiveLocation == "" {
 			continue
 		}
 		key := decision.ProviderID + "::" + strings.ToLower(strings.TrimSpace(decision.ActiveLocation))
-		if actual[key] != "running" {
-			return false
-		}
+		expected[key] = struct{}{}
 	}
-	return true
+	return !s.subscriptionTargetsNeedRecovery(expected, snapshot.SubscriptionRuntime)
 }
 
 func priorityReasonWithProbe(reason string, probe providerProbeResult) string {
@@ -902,7 +1032,10 @@ func formatPriorityApplyMessage(decisions map[string]priorityDecision) string {
 	}
 	parts := make([]string, 0, len(decisions))
 	for _, decision := range decisions {
-		target := decision.ActiveLocation
+		target := decision.servingLocation()
+		if decision.outcome.Blocked {
+			target = "blocked"
+		}
 		if decision.Mode == "direct" {
 			target = "direct"
 		}
@@ -931,6 +1064,7 @@ func (s *Supervisor) PriorityStatus() PriorityStatus {
 	for _, policy := range state.PriorityPolicies {
 		provider := providers[policy.ProviderID]
 		decision := s.priority.decisions[policy.ID]
+		activeLocation := decision.servingLocation()
 		override := s.priority.overrides[policy.ID]
 		item := PriorityPolicyStatus{
 			PolicyID:          policy.ID,
@@ -940,7 +1074,9 @@ func (s *Supervisor) PriorityStatus() PriorityStatus {
 			Enabled:           policy.Enabled,
 			SelectionMode:     config.NormalizePrioritySelectionMode(policy.SelectionMode),
 			ScheduledLocation: activePriorityScheduleLocation(policy, time.Now()),
-			ActiveLocation:    decision.ActiveLocation,
+			ActiveLocation:    activeLocation,
+			LocationIssue:     decision.outcome.Issue,
+			Blocked:           decision.outcome.Blocked,
 			PreferredLocation: decision.PreferredLocation,
 			OverrideLocation:  override.Location,
 			Mode:              decision.Mode,
@@ -967,7 +1103,7 @@ func (s *Supervisor) PriorityStatus() PriorityStatus {
 				PingMs:               ping.Ms,
 				PingError:            ping.Error,
 				PingCheckedAt:        timeString(ping.Checked),
-				Active:               strings.EqualFold(location, decision.ActiveLocation),
+				Active:               strings.EqualFold(location, activeLocation),
 				Preferred:            strings.EqualFold(location, decision.PreferredLocation),
 			})
 		}

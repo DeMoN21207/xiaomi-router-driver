@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchJSON } from "../api.js";
-import { routingOverview, serverSwitchRequest, routeDomainSources, domainSaveRequest } from "../routingOverview.js";
+import { routingOverview, serverSwitchRequest, prioritySelectionMessage, prioritySelectionError, routeDomainSources, domainSaveRequest } from "../routingOverview.js";
 import { parseDomainInput } from "../domainInput.js";
 import Icon from "./Icon.jsx";
 import ServerPing from "./ServerPing.jsx";
@@ -30,16 +30,18 @@ export default function RoutingOverview({ config, statusMap, failoverMap, busy, 
     setError(null);
     setPageError("");
     try {
-      await fetchJSON(request.path, {
+      const result = await fetchJSON(request.path, {
         method: request.method, timeoutMs: 150_000,
         ...(request.body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(request.body) } : {}),
       });
+      const feedback = typeof message === "function" ? message(result) : message;
       await onChanged();
       edit("");
-      showToast(message);
+      showToast(feedback);
       return true;
     } catch (failure) {
-      setError({ id, message: failure.message });
+      setError({ id, message: prioritySelectionError(failure, t) });
+      if (failure.code?.startsWith("priority_")) await onChanged();
       return false;
     } finally {
       lock.current = false;
@@ -88,14 +90,16 @@ function ServerControl({ row, name, editing, edit, busy, pending, error, apply, 
   return <div className="min-w-0">
     <p className="text-xs text-on-surface-variant">{t(configuredOnly ? "connections.configuredServer" : "connections.workingServer")}</p>
     <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-      <p className="min-w-0 break-words text-base font-semibold text-on-surface">{row.unavailable ? t("connections.noVpnServer") : row.activeLocation || (configuredOnly && row.configuredLocation) || t("connections.waitingServer")}</p>
+      <p className="min-w-0 break-words text-base font-semibold text-on-surface">{row.unavailable || row.blocked ? t("connections.noVpnServer") : row.activeLocation || (configuredOnly && row.configuredLocation) || t("connections.waitingServer")}</p>
       {row.activeLocation && <ServerPing target={activeTarget} t={t} />}
     </div>
-    <p className="mt-1 text-xs text-on-surface-variant">{t(mode)}</p>
+    {row.blocked || row.locationIssue
+      ? <p className="mt-1 break-words text-sm text-error">{t(row.blocked ? "connections.routeBlocked" : row.activeLocation ? "connections.routeRetained" : "connections.routeUnconfirmed")}</p>
+      : <p className="mt-1 text-xs text-on-surface-variant">{t(mode)}</p>}
     {row.canQuickSwitch ? <form className="mt-4" onSubmit={async event => {
       event.preventDefault();
       if (!changed) return;
-      if (await apply(id, serverSwitchRequest(row, choice), t(choice ? "connections.locationUpdated" : "connections.priorityOverrideCleared"))) setDraft(null);
+      if (await apply(id, serverSwitchRequest(row, choice), row.policyId ? result => prioritySelectionMessage(result, t) : t("connections.locationUpdated"))) setDraft(null);
     }}>
       <label htmlFor={`choice-${row.id}`} className="mb-2 block text-sm text-on-surface">{t("connections.chooseServer")}</label>
       <select ref={selectRef} id={`choice-${row.id}`} aria-label={t("connections.chooseServerFor", { name })} value={choice} disabled={disabled} onChange={event => {

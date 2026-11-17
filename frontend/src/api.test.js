@@ -113,3 +113,18 @@ test("subscription refresh reports its user-facing operation without leaking loa
   release();await pending;assert.equal(states.at(-1).count,0);
  }finally{release?.();await pending.catch(()=>{});unsubscribe();globalThis.fetch=originalFetch;}
 });
+
+test("fetchJSON preserves a manual-selection failure code for localization", async () => {
+  const { fetchJSON } = await import("./api.js");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, status: 409, json: async () => ({
+    error: "selected server did not pass the VPN check", code: "priority_target_unavailable",
+  }) });
+  try {
+    await assert.rejects(() => fetchJSON("/api/priority-policies/test/override"), {
+      code: "priority_target_unavailable", message: "selected server did not pass the VPN check",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

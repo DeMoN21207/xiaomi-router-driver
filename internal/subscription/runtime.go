@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,11 +51,13 @@ type Manager struct {
 }
 
 type desiredInstance struct {
-	Key      string
-	Provider config.Provider
-	Location string
-	Domains  []string
-	Entry    Entry
+	Key           string
+	Provider      config.Provider
+	Location      string
+	Domains       []string
+	Entry         Entry
+	LocationIssue string
+	previous      *applyPlan
 }
 
 type applyPlan struct {
@@ -71,6 +74,7 @@ type managedInstance struct {
 	ProviderID     string
 	ProviderName   string
 	Location       string
+	LocationIssue  string
 	InterfaceName  string
 	DomainCount    int
 	ConfigPath     string
@@ -86,6 +90,7 @@ type RuntimeSnapshot struct {
 	ProviderID    string `json:"providerId"`
 	ProviderName  string `json:"providerName"`
 	Location      string `json:"location"`
+	LocationIssue string `json:"locationIssue,omitempty"`
 	InterfaceName string `json:"interfaceName"`
 	TableNum      int    `json:"tableNum"`
 	FWMark        string `json:"fwMark"`
@@ -143,6 +148,10 @@ func NewManager(appDir string, dataDir string, db *sql.DB, routingRunner *routin
 func (m *Manager) Apply(ctx context.Context, state config.State, enabledRules []config.Rule) (applyErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	report, _ := ctx.Value(applyReportKey{}).(*ApplyReport)
+	if report != nil {
+		report.Rules = nil
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -162,6 +171,12 @@ func (m *Manager) Apply(ctx context.Context, state config.State, enabledRules []
 	if err != nil {
 		return err
 	}
+	rollback, err := m.prepareRollback(ctx, existingInstances)
+	if err != nil {
+		return err
+	}
+	defer rollback.close()
+	desired, outcomes := m.resolveUnavailable(desired, rollback.plans, existingInstances, state.Routing)
 	plans, err := m.buildApplyPlans(desired, state.Routing)
 	if err != nil {
 		return err
@@ -173,12 +188,6 @@ func (m *Manager) Apply(ctx context.Context, state config.State, enabledRules []
 			}
 		}
 	}
-	rollback, err := m.prepareRollback(ctx, existingInstances)
-	if err != nil {
-		return err
-	}
-	defer rollback.close()
-
 	copyRouting, _ := ctx.Value(routingSnapshotKey{}).(bool)
 	existingCount := 0
 	for _, instance := range existingInstances {
@@ -235,6 +244,14 @@ func (m *Manager) Apply(ctx context.Context, state config.State, enabledRules []
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if old := plan.desired.previous; old != nil && reusable[plan.desired.Key] != nil && sameDomainSet(old.desired.Domains, plan.desired.Domains) {
+			instance := reusable[plan.desired.Key]
+			instance.LocationIssue = plan.desired.LocationIssue
+			if err := m.saveInstanceLocked(instance); err != nil {
+				return err
+			}
+			continue
+		}
 		touched[plan.desired.Key] = true
 		startedPlans[plan.desired.Key] = plan
 		if existing := reusable[plan.desired.Key]; existing != nil {
@@ -271,7 +288,24 @@ func (m *Manager) Apply(ctx context.Context, state config.State, enabledRules []
 		}
 	}
 
-	return m.pruneRuntimeFilesLocked()
+	if err := m.pruneRuntimeFilesLocked(); err != nil {
+		return err
+	}
+	for _, outcome := range outcomes {
+		if outcome.Issue == "" {
+			continue
+		}
+		alreadyReported := slices.ContainsFunc(rollback.plans, func(plan applyPlan) bool {
+			return plan.desired.Provider.ID == outcome.ProviderID && plan.desired.LocationIssue == outcome.Issue
+		})
+		if !alreadyReported {
+			m.record("warn", "subscription.location_unavailable", outcome.Issue)
+		}
+	}
+	if report != nil {
+		report.publish(enabledRules, outcomes)
+	}
+	return nil
 }
 
 func (m *Manager) Cleanup(ctx context.Context) error {
@@ -362,6 +396,7 @@ func (m *Manager) startPlannedInstance(plan applyPlan) (*managedInstance, error)
 		ProviderID:     plan.desired.Provider.ID,
 		ProviderName:   plan.desired.Provider.Name,
 		Location:       plan.desired.Location,
+		LocationIssue:  plan.desired.LocationIssue,
 		InterfaceName:  plan.settings.VPNIface,
 		DomainCount:    len(plan.desired.Domains),
 		ConfigPath:     plan.configPath,
@@ -508,12 +543,33 @@ func (m *Manager) cleanupLocked(ctx context.Context) error {
 
 func (m *Manager) buildApplyPlans(desired []desiredInstance, base config.RoutingSettings) ([]applyPlan, error) {
 	plans := make([]applyPlan, 0, len(desired))
-	for index, item := range desired {
+	reserved := make(map[int]bool)
+	for _, item := range desired {
+		if item.previous != nil {
+			reserved[item.previous.settings.TableNum-base.TableNum] = true
+		}
+	}
+	index := 0
+	for _, item := range desired {
+		if item.previous != nil {
+			plan := *item.previous
+			plan.desired = item
+			plan.ipsetRestorePath = ""
+			plans = append(plans, plan)
+			continue
+		}
+		for reserved[index] {
+			index++
+		}
 		hash := shortHash(item.Provider.ID + "\n" + item.Location)
 		settings := deriveRoutingSettings(base, hash, index)
 		runtimeConfig := buildSingBoxConfig(settings.VPNIface, index, item.Entry.Outbound)
 		configPath := filepath.Join(m.runtimeDir, hash+".json")
-		if item.Entry.UsesXray() {
+		if item.LocationIssue != "" {
+			delete(runtimeConfig, "outbounds")
+			runtimeConfig["route"] = map[string]any{"rules": []any{map[string]any{"inbound": "tun-in", "action": "reject"}}}
+			configPath = filepath.Join(m.runtimeDir, hash+".blocked.json")
+		} else if item.Entry.UsesXray() {
 			runtimeConfig = buildXrayTUNConfig(settings.VPNIface, index, item.Entry.Outbound)
 			configPath = filepath.Join(m.runtimeDir, hash+".xray.json")
 		}
@@ -530,6 +586,7 @@ func (m *Manager) buildApplyPlans(desired []desiredInstance, base config.Routing
 			configPath:     configPath,
 			configData:     configData,
 		})
+		index++
 	}
 	return plans, nil
 }
@@ -607,6 +664,7 @@ func (m *Manager) applyRoutingToInstanceLocked(ctx context.Context, instance *ma
 	target.ProviderID = plan.desired.Provider.ID
 	target.ProviderName = plan.desired.Provider.Name
 	target.Location = plan.desired.Location
+	target.LocationIssue = plan.desired.LocationIssue
 	target.InterfaceName = plan.settings.VPNIface
 	target.DomainCount = len(plan.desired.Domains)
 	target.ConfigPath = plan.configPath
@@ -712,6 +770,7 @@ func (m *Manager) buildDesired(ctx context.Context, state config.State, enabledR
 	}
 
 	entriesByProvider := make(map[string][]Entry, len(activeGroups))
+	loadIssues := make(map[string]string)
 	for _, group := range activeGroups {
 		if _, loaded := entriesByProvider[group.Provider.ID]; loaded {
 			continue
@@ -725,7 +784,10 @@ func (m *Manager) buildDesired(ctx context.Context, state config.State, enabledR
 			entries, fetchMode, err = FetchEntriesCachedContext(ctx, group.Provider.Source, m.runtimeDir)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("load subscription %q: %w", group.Provider.Name, err)
+			if !cacheOnly || ctx.Err() != nil {
+				return nil, fmt.Errorf("load subscription %q: %w", group.Provider.Name, err)
+			}
+			loadIssues[group.Provider.ID] = fmt.Sprintf("load subscription %q: %v", group.Provider.Name, err)
 		}
 		if fetchMode == entriesFetchStaleCacheFallback {
 			m.record("warn", "subscription.source_cache_used", fmt.Sprintf("%s source is unavailable, using cached subscription snapshot", group.Provider.Name))
@@ -736,24 +798,37 @@ func (m *Manager) buildDesired(ctx context.Context, state config.State, enabledR
 	desired := make([]desiredInstance, 0, len(activeGroups))
 	for _, group := range activeGroups {
 		entry, found := findEntry(entriesByProvider[group.Provider.ID], group.Location)
-		if !found {
-			return nil, fmt.Errorf("location %q not found in provider %q", group.Location, group.Provider.Name)
+		switch {
+		case loadIssues[group.Provider.ID] != "":
+			group.LocationIssue = loadIssues[group.Provider.ID]
+		case !found:
+			group.LocationIssue = fmt.Sprintf("location %q not found in provider %q", group.Location, group.Provider.Name)
+		default:
+			if issue := EntryEndpointIssue(entry); issue != "" {
+				group.LocationIssue = fmt.Sprintf("location %q in provider %q cannot be used: %s", group.Location, group.Provider.Name, issue)
+			}
 		}
-		if issue := EntryEndpointIssue(entry); issue != "" {
-			return nil, fmt.Errorf("location %q in provider %q cannot be used: %s", group.Location, group.Provider.Name, issue)
+		if group.LocationIssue != "" && !cacheOnly {
+			return nil, errors.New(group.LocationIssue)
 		}
 		group.Entry = entry
 		desired = append(desired, *group)
 	}
 
+	sortDesired(desired)
+	return desired, nil
+}
+
+func sortDesired(desired []desiredInstance) {
 	sort.Slice(desired, func(i, j int) bool {
 		if desired[i].Provider.Name == desired[j].Provider.Name {
+			if desired[i].Location == desired[j].Location {
+				return desired[i].Key < desired[j].Key
+			}
 			return desired[i].Location < desired[j].Location
 		}
 		return desired[i].Provider.Name < desired[j].Provider.Name
 	})
-
-	return desired, nil
 }
 
 func buildSingBoxConfig(interfaceName string, index int, outbound map[string]any) map[string]any {
@@ -939,12 +1014,19 @@ func (m *Manager) snapshotFromInstance(instance *managedInstance) RuntimeSnapsho
 		ProcessMarkers:       []string{m.runtimeBinary(instance.ConfigPath), instance.ConfigPath},
 		EnableInterfaceProbe: false,
 	})
+	if strings.HasSuffix(instance.ConfigPath, ".blocked.json") {
+		assessment.Status = "error"
+		assessment.Detail = instance.LocationIssue
+	} else if assessment.Status == "running" && instance.LocationIssue != "" {
+		assessment.Detail = instance.LocationIssue
+	}
 
 	return RuntimeSnapshot{
 		Key:           instance.Key,
 		ProviderID:    instance.ProviderID,
 		ProviderName:  instance.ProviderName,
 		Location:      instance.Location,
+		LocationIssue: instance.LocationIssue,
 		InterfaceName: instance.InterfaceName,
 		TableNum:      instance.Settings.TableNum,
 		FWMark:        instance.Settings.FWMark,

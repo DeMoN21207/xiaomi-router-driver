@@ -1,6 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { applyRules, fetchJSON, refreshSubscription as requestSubscriptionRefresh } from "../api.js";
 import SharedDomainEditor from "../components/SharedDomainEditor.jsx";
+import { prioritySelectionMessage, prioritySelectionError as formatPriorityError } from "../routingOverview.js";
 import RoutingOverview from "../components/RoutingOverview.jsx";
 import SectionTabs from "../components/SectionTabs.jsx";
 import ServerPing from "../components/ServerPing.jsx";
@@ -317,18 +318,19 @@ export default function ConnectionsPage() {
     setPrioritySelection({ policyId: policy.id, location });
     setPrioritySelectionError(null);
     try {
-      await fetchJSON(`/api/priority-policies/${encodeURIComponent(policy.id)}/override`, {
+      const result = await fetchJSON(`/api/priority-policies/${encodeURIComponent(policy.id)}/override`, {
         method: location === null ? "DELETE" : "POST",
         ...(location === null ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ location }) }),
         timeoutMs: 150_000,
       });
       await refresh();
-      showToast(t(location === null ? "connections.priorityOverrideCleared" : "connections.locationUpdated"));
+      showToast(prioritySelectionMessage(result, t));
     } catch (error) {
-      setPrioritySelectionError({ policyId: policy.id, message: error.message });
-      setPageError(error.message);
-      showToast(error.message, true);
+      const message = formatPriorityError(error, t);
+      setPrioritySelectionError({ policyId: policy.id, message });
+      showToast(message, true);
       await refresh();
+      setPageError(message);
     } finally {
       prioritySelectionLock.current = false;
       setPrioritySelection(null);

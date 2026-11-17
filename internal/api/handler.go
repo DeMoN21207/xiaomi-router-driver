@@ -47,9 +47,8 @@ type Dependencies struct {
 	Update                *update.Manager
 	FailoverStatus        func() automation.FailoverStatus
 	PriorityStatus        func() automation.PriorityStatus
-	SetPriorityOverride   func(policyID string, location string) error
+	ApplyPriorityOverride func(context.Context, string, string) (string, error)
 	ClearPriorityOverride func(policyID string)
-	ApplyPriorityNow      func(ctx context.Context) error
 	DataDir               string
 }
 
@@ -65,9 +64,8 @@ type Handler struct {
 	update                *update.Manager
 	failoverStatus        func() automation.FailoverStatus
 	priorityStatus        func() automation.PriorityStatus
-	setPriorityOverride   func(policyID string, location string) error
+	applyPriorityOverride func(context.Context, string, string) (string, error)
 	clearPriorityOverride func(policyID string)
-	applyPriorityNow      func(ctx context.Context) error
 	dataDir               string
 	router                http.Handler
 	applyMu               sync.Mutex
@@ -135,9 +133,8 @@ func NewHandler(deps Dependencies) *Handler {
 		update:                deps.Update,
 		failoverStatus:        deps.FailoverStatus,
 		priorityStatus:        deps.PriorityStatus,
-		setPriorityOverride:   deps.SetPriorityOverride,
+		applyPriorityOverride: deps.ApplyPriorityOverride,
 		clearPriorityOverride: deps.ClearPriorityOverride,
-		applyPriorityNow:      deps.ApplyPriorityNow,
 		dataDir:               deps.DataDir,
 		appContext:            appContext,
 		applyOperations:       make(map[string]applyOperation),
@@ -189,11 +186,10 @@ func (h *Handler) SetFailoverStatusProvider(provider func() automation.FailoverS
 	h.failoverStatus = provider
 }
 
-func (h *Handler) SetPriorityRuntime(statusProvider func() automation.PriorityStatus, setOverride func(policyID string, location string) error, clearOverride func(policyID string), applyNow func(ctx context.Context) error) {
+func (h *Handler) SetPriorityRuntime(statusProvider func() automation.PriorityStatus, applyOverride func(context.Context, string, string) (string, error), clearOverride func(policyID string)) {
 	h.priorityStatus = statusProvider
-	h.setPriorityOverride = setOverride
+	h.applyPriorityOverride = applyOverride
 	h.clearPriorityOverride = clearOverride
-	h.applyPriorityNow = applyNow
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1112,61 +1108,64 @@ func (h *Handler) handlePriorityPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handlePriorityPolicyOverride(w http.ResponseWriter, r *http.Request, id string) {
-	switch r.Method {
-	case http.MethodPost:
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		writeMethodNotAllowed(w, http.MethodPost, http.MethodDelete)
+		return
+	}
+	state, err := h.state.Load()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	policy, ok := findRuntimePriorityPolicy(state, id)
+	if !ok {
+		writeError(w, http.StatusNotFound, fmt.Errorf("priority policy %s not found", id))
+		return
+	}
+	location := ""
+	result := "override_cleared"
+	if r.Method == http.MethodPost {
 		var req priorityOverrideRequest
 		if err := decodeJSON(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		state, err := h.state.Load()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		policy, ok := findRuntimePriorityPolicy(state, id)
-		if !ok {
-			writeError(w, http.StatusNotFound, fmt.Errorf("priority policy %s not found", id))
-			return
-		}
-		location := strings.TrimSpace(req.Location)
-		if !priorityPolicyHasTarget(policy, location) {
+		location = strings.TrimSpace(req.Location)
+		if location == "" || !priorityPolicyHasTarget(policy, location) {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("location %q is not in priority policy targets", location))
 			return
 		}
-		if h.setPriorityOverride == nil {
-			writeError(w, http.StatusConflict, errors.New("priority runtime is not configured"))
-			return
-		}
-		if err := h.setPriorityOverride(id, location); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		if h.applyPriorityNow != nil {
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), applyRequestTimeout)
-			defer cancel()
-			if err := h.applyPriorityNow(ctx); err != nil {
-				writeApplyError(w, err)
-				return
-			}
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "override_set"})
-	case http.MethodDelete:
-		if h.clearPriorityOverride != nil {
-			h.clearPriorityOverride(id)
-		}
-		if h.applyPriorityNow != nil {
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), applyRequestTimeout)
-			defer cancel()
-			if err := h.applyPriorityNow(ctx); err != nil {
-				writeApplyError(w, err)
-				return
-			}
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "override_cleared"})
-	default:
-		writeMethodNotAllowed(w, http.MethodPost, http.MethodDelete)
+		result = "override_set"
 	}
+	if h.applyPriorityOverride == nil {
+		writePrioritySelectionError(w, automation.ErrPriorityUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), applyRequestTimeout)
+	defer cancel()
+	active, err := h.applyPriorityOverride(ctx, id, location)
+	if err != nil {
+		writePrioritySelectionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": result, "activeLocation": active})
+}
+
+func writePrioritySelectionError(w http.ResponseWriter, err error) {
+	code, statusCode := "priority_apply_failed", http.StatusInternalServerError
+	switch {
+	case errors.Is(err, automation.ErrPriorityTargetUnavailable):
+		code, statusCode = "priority_target_unavailable", http.StatusConflict
+	case errors.Is(err, automation.ErrPriorityProviderFallback):
+		code, statusCode = "priority_provider_fallback", http.StatusConflict
+	case errors.Is(err, automation.ErrPriorityUnconfirmed):
+		code, statusCode = "priority_unconfirmed", http.StatusConflict
+	case errors.Is(err, automation.ErrPriorityUnavailable):
+		code, statusCode = "priority_unavailable", http.StatusServiceUnavailable
+	case errors.Is(err, context.DeadlineExceeded):
+		code, statusCode = "priority_timeout", http.StatusGatewayTimeout
+	}
+	writeJSON(w, statusCode, map[string]string{"code": code, "error": err.Error()})
 }
 
 func (h *Handler) handleProviders(w http.ResponseWriter, r *http.Request) {

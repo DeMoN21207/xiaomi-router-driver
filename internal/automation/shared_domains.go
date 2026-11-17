@@ -79,5 +79,5 @@ func (s *Supervisor) SharedDomainLocation() string {
 	}
 	s.priorityMu.RLock()
 	defer s.priorityMu.RUnlock()
-	return s.priority.decisions[policyID].ActiveLocation
+	return s.priority.decisions[policyID].servingLocation()
 }

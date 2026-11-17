@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { routingOverview, serverSwitchRequest, routeDomainSources, domainSaveRequest } from "./routingOverview.js";
+import { routingOverview, serverSwitchRequest, prioritySelectionMessage, routeDomainSources, domainSaveRequest } from "./routingOverview.js";
 
 const config = {
   providers: [{ id: "vpn", name: "Subscription", enabled: true }],
@@ -142,4 +142,27 @@ test("stale site drafts cannot overwrite another edit; current server fields are
   const changed = { ...config, rules: config.rules.map(r => r.id === "ai" ? { ...r, domains: ["changed.example"] } : r) };
   assert.throws(() => domainSaveRequest(changed, source, []), /changed/);
   assert.throws(() => domainSaveRequest({ ...config, rules: [] }, source, []), /changed/);
+});
+
+test("degraded policies identify the affected route and respect a provider fallback", () => {
+  const statuses = new Map([
+    ["common-policy", { blocked: true, locationIssue: "missing from subscription" }],
+    ["ai-policy", { activeLocation: "Germany", locationIssue: "retained runtime" }],
+  ]);
+  const [blocked, retained] = routingOverview(config, statuses);
+  assert.equal(blocked.blocked, true);
+  assert.equal(blocked.activeLocation, "");
+  assert.equal(retained.activeLocation, "Germany");
+  assert.equal(retained.locationIssue, "retained runtime");
+  const [replaced] = routingOverview(config, statuses, new Map([["main", { mode: "provider", activeLocation: "Finland" }]]));
+  assert.equal(replaced.activeLocation, "Finland");
+  assert.equal(replaced.blocked, false);
+  assert.equal(replaced.locationIssue, "");
+});
+
+test("selection feedback requires confirmed server and names the automatic server", () => {
+  const translated = (key, values) => [key, values?.location].filter(Boolean).join(" ");
+  assert.equal(prioritySelectionMessage({ status: "override_cleared", activeLocation: "Sweden" }, translated), "connections.priorityAutomaticActive Sweden");
+  assert.equal(prioritySelectionMessage({ status: "override_set", activeLocation: "Latvia" }, translated), "connections.priorityManualActive Latvia");
+  assert.throws(() => prioritySelectionMessage({ status: "override_set" }, translated), /priority_unconfirmed/);
 });
