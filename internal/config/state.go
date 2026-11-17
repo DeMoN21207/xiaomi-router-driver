@@ -93,6 +93,8 @@ type UpdateSettings struct {
 }
 
 type State struct {
+	// Managed independently: ordinary configuration saves must not erase exceptions.
+	ExcludedDevices  []DeviceExclusion  `json:"excludedDevices"`
 	Providers        []Provider         `json:"providers"`
 	Rules            []Rule             `json:"rules"`
 	SharedDomains    SharedDomainList   `json:"sharedDomains"`
@@ -121,6 +123,7 @@ func NewManager(db *sql.DB, legacyPath string) *Manager {
 
 func DefaultState() State {
 	return State{
+		ExcludedDevices:  []DeviceExclusion{},
 		Providers:        []Provider{},
 		Rules:            []Rule{},
 		PriorityPolicies: []PriorityPolicy{},
@@ -543,6 +546,7 @@ func ensureStateSchema(db *sql.DB) error {
 			position INTEGER NOT NULL,
 			FOREIGN KEY (policy_id) REFERENCES priority_policies(id) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS device_exclusions (mac TEXT PRIMARY KEY, name TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS routing_settings (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			vpn_gateway TEXT NOT NULL,
@@ -874,6 +878,11 @@ func saveMetaTx(tx *sql.Tx, key string, value string) error {
 
 func (m *Manager) loadUnlocked() (State, error) {
 	state := DefaultState()
+	exclusions, err := m.deviceExclusionsUnlocked()
+	if err != nil {
+		return State{}, err
+	}
+	state.ExcludedDevices = exclusions
 
 	providerRows, err := m.db.Query(`
 		SELECT id, name, type, source, selected_location, enabled

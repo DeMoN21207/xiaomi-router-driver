@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -93,6 +94,7 @@ func main() {
 	}
 	routingRunner := routing.NewRunner(routingScriptPath)
 	routingRunner.SetDNSProxyServer(dnsProxyServer)
+	routingRunner.SetDeviceExclusionsPath(filepath.Join(paths.DataDir, "device-exclusions.macs"))
 	automationManager := automation.NewManager(paths.AppDir, executablePath, port)
 	openvpnManager := openvpn.NewManager(paths.AppDir, paths.DataDir, db, routingRunner, recordEvent)
 	subscriptionManager := subscription.NewManager(paths.AppDir, paths.DataDir, db, routingRunner, recordEvent)
@@ -126,6 +128,18 @@ func main() {
 
 	if _, err := stateManager.Load(); err != nil {
 		log.Fatalf("bootstrap state store: %v", err)
+	}
+	if runtime.GOOS == "linux" {
+		state, err := stateManager.Load()
+		if err != nil {
+			log.Fatalf("load device exclusions: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(rootCtx, 60*time.Second)
+		err = routingRunner.ApplyDeviceExclusions(ctx, state.Routing, state.ExcludedDevices, nil)
+		cancel()
+		if err != nil {
+			log.Fatalf("restore device exclusions: %v", err)
+		}
 	}
 	if _, err := domainManager.List(); err != nil {
 		log.Fatalf("bootstrap domains store: %v", err)

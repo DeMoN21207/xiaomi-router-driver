@@ -48,6 +48,9 @@ PINNED_CHAIN="VPN_MANAGER_PINNED"
 PINNED_FILTER_CHAIN="VPN_MANAGER_PIN_GUARD"
 PINNED_STATE_DIR="${GUARD_STATE_FILE:-/tmp/vpn-manager-guard}.pinned"
 CONNTRACK_FLUSH_ON_APPLY="${CONNTRACK_FLUSH_ON_APPLY:-0}"
+DEVICE_BYPASS_FILE="${DEVICE_BYPASS_FILE:-}"
+DEVICE_BYPASS_SET="vpn_device_bypass"
+DEVICE_BYPASS_MARK="0x40000000"
 # --- END OF SETTINGS ---
 
 ENABLE_DOMAIN_STATS=1
@@ -641,12 +644,70 @@ ensure_firewall_processing() {
     return 1
 }
 
+ensure_device_exclusions() {
+    [ -n "$DEVICE_BYPASS_FILE" ] || return 0
+    [ -r "$DEVICE_BYPASS_FILE" ] || return 1
+    ipset create "$DEVICE_BYPASS_SET" hash:mac maxelem 4096 -exist || return 1
+    ipset create "${DEVICE_BYPASS_SET}_next" hash:mac maxelem 4096 -exist || return 1
+    ipset flush "${DEVICE_BYPASS_SET}_next" || return 1
+    while IFS= read -r device_mac; do
+        [ -n "$device_mac" ] || continue
+        ipset add "${DEVICE_BYPASS_SET}_next" "$device_mac" -exist || return 1
+    done < "$DEVICE_BYPASS_FILE"
+
+    iptables -t mangle -N VPN_DEVICE_BYPASS 2>/dev/null || true
+    if ! iptables -t mangle -C VPN_DEVICE_BYPASS -m set --match-set "$DEVICE_BYPASS_SET" src -j MARK --set-mark "$DEVICE_BYPASS_MARK" >/dev/null 2>&1; then
+        iptables -t mangle -A VPN_DEVICE_BYPASS -m set --match-set "$DEVICE_BYPASS_SET" src -j MARK --set-mark "$DEVICE_BYPASS_MARK" || return 1
+    fi
+    if ! iptables -t mangle -C VPN_DEVICE_BYPASS -m set --match-set "$DEVICE_BYPASS_SET" src -j ACCEPT >/dev/null 2>&1; then
+        # ACCEPT ends only mangle processing. The normal filter firewall still runs.
+        iptables -t mangle -A VPN_DEVICE_BYPASS -m set --match-set "$DEVICE_BYPASS_SET" src -j ACCEPT || return 1
+    fi
+    while iptables -t mangle -D PREROUTING -i "$LAN_IFACE" -j VPN_DEVICE_BYPASS >/dev/null 2>&1; do :; done
+    iptables -t mangle -I PREROUTING 1 -i "$LAN_IFACE" -j VPN_DEVICE_BYPASS || return 1
+    if ! ip rule show | grep -q 'fwmark 0x40000000 lookup main'; then
+        ip rule add pref 50 fwmark "$DEVICE_BYPASS_MARK" lookup main || return 1
+    fi
+    for device_proto in udp tcp; do
+        while iptables -t nat -D PREROUTING -i "$LAN_IFACE" -p "$device_proto" --dport 53 -m mark --mark "$DEVICE_BYPASS_MARK" -j ACCEPT >/dev/null 2>&1; do :; done
+        iptables -t nat -I PREROUTING 1 -i "$LAN_IFACE" -p "$device_proto" --dport 53 -m mark --mark "$DEVICE_BYPASS_MARK" -j ACCEPT || return 1
+    done
+    # Never ACCEPT in filter/FORWARD: skip our guards, preserve the router firewall.
+    for device_chain in "$GUARD_CHAIN" "$PINNED_FILTER_CHAIN"; do
+        iptables -N "$device_chain" 2>/dev/null || true
+        while iptables -D "$device_chain" -m mark --mark "$DEVICE_BYPASS_MARK" -j RETURN >/dev/null 2>&1; do :; done
+        iptables -I "$device_chain" 1 -m mark --mark "$DEVICE_BYPASS_MARK" -j RETURN || return 1
+    done
+    for device_chain in "$EGRESS_GUARD_CHAIN" "$PINNED_FILTER_CHAIN"; do
+        iptables -t mangle -N "$device_chain" 2>/dev/null || true
+        while iptables -t mangle -D "$device_chain" -m mark --mark "$DEVICE_BYPASS_MARK" -j RETURN >/dev/null 2>&1; do :; done
+        iptables -t mangle -I "$device_chain" 1 -m mark --mark "$DEVICE_BYPASS_MARK" -j RETURN || return 1
+    done
+    # Commit membership only after every bypass path is ready.
+    ipset swap "${DEVICE_BYPASS_SET}_next" "$DEVICE_BYPASS_SET" || return 1
+    ipset flush "${DEVICE_BYPASS_SET}_next" || return 1
+    ip route flush cache >/dev/null 2>&1 || true
+}
+# End device exclusions
+
+clear_device_connections() {
+    [ -n "${DEVICE_BYPASS_CONNTRACK_IPS:-}" ] || return 0
+    command -v conntrack >/dev/null 2>&1 || { echo "Error: conntrack is required to switch this device immediately." >&2; return 1; }
+    for device_ip in $DEVICE_BYPASS_CONNTRACK_IPS; do
+        # Exit 1 also means there were no matching connections.
+        conntrack -D -s "$device_ip" >/dev/null 2>&1
+        device_rc=$?
+        [ "$device_rc" -le 1 ] || return 1
+    done
+}
+
 protect_known_destinations() {
     ensure_guard || return 1
     ensure_pinned_routes || return 1
     ensure_firewall_processing || return 1
     handle_ipv6_mode || return 1
     ensure_dns_hijack_rules || return 1
+    ensure_device_exclusions || return 1
     if ipset list "$IPSET_NAME" >/dev/null 2>&1; then
         ipset save "$IPSET_NAME" | awk -v target="$GUARD_IPSET" '$1 == "add" {print "add", target, $3, "timeout 0"}' | ipset restore -exist || return 1
     fi
@@ -1397,6 +1458,11 @@ fi
 trap release_routing_lock EXIT INT TERM
 
 case "$1" in
+    devices)
+        ensure_firewall_processing || exit 1
+        ensure_device_exclusions || exit 1
+        clear_device_connections || exit 1
+        ;;
     guard)
         protect_known_destinations || exit 1
         ;;

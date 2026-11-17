@@ -9,19 +9,23 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"xiomi-router-driver/internal/config"
 )
 
 type Runner struct {
-	scriptPath     string
-	workingDir     string
-	dnsProxyServer string
+	scriptPath           string
+	workingDir           string
+	dnsProxyServer       string
+	deviceExclusionsPath string
+	deviceExclusionsMu   sync.Mutex
 }
 
 type RunOptions struct {
 	Settings         config.RoutingSettings
 	DomainListPath   string
 	IPSetRestorePath string
+	ChangedDeviceIPs []string
 }
 
 func NewRunner(scriptPath string) *Runner {
@@ -72,29 +76,31 @@ func (r *Runner) RunWithOptions(ctx context.Context, action string, options RunO
 	cmd.Dir = r.workingDir
 	loadProfile := config.RoutingLoadProfileTuningFor(options.Settings.LoadProfile)
 	envValues := map[string]string{
-		"DOMAIN_LIST":               domainListPath,
-		"DOMAIN_STATS_MAX_DOMAINS":  strconv.Itoa(DomainStatsMaxDomainsWithFallback(loadProfile.DomainStatsMaxDomains)),
-		"VPN_MANAGER_DOMAIN_STATS":  DomainStatsModeWithFallback(loadProfile.DomainStatsMode),
-		"PRIME_MAX_DOMAINS":         strconv.Itoa(resolveIntEnvWithFallback(loadProfile.PrimeMaxDomains, "VPN_MANAGER_PRIME_MAX_DOMAINS", "PRIME_MAX_DOMAINS")),
-		"IPSET_TIMEOUT":             strconv.Itoa(resolveIntEnvWithFallback(loadProfile.IPSetTimeout, "VPN_MANAGER_IPSET_TIMEOUT", "IPSET_TIMEOUT")),
-		"IPSET_FLUSH_ON_SYNC":       boolToScriptValue(resolveBoolEnvWithFallback(loadProfile.IPSetFlushOnSync, "VPN_MANAGER_IPSET_FLUSH_ON_SYNC", "IPSET_FLUSH_ON_SYNC")),
-		"CONNTRACK_FLUSH_ON_APPLY":  boolToScriptValue(resolveBoolEnvWithFallback(loadProfile.ConntrackFlushOnApply, "VPN_MANAGER_CONNTRACK_FLUSH_ON_APPLY", "CONNTRACK_FLUSH_ON_APPLY")),
-		"VPN_GATEWAY":               options.Settings.VPNGateway,
-		"VPN_ROUTE_MODE":            options.Settings.VPNRouteMode,
-		"VPN_MASQUERADE":            boolToScriptValue(options.Settings.VPNMasquerade),
-		"LAN_IFACE":                 options.Settings.LANIface,
-		"VPN_IFACE":                 options.Settings.VPNIface,
-		"TABLE_NUM":                 strconv.Itoa(options.Settings.TableNum),
-		"FW_ZONE_CHAIN":             options.Settings.FWZoneChain,
-		"IPSET_NAME":                options.Settings.IPSetName,
-		"FWMARK":                    options.Settings.FWMark,
-		"DNSMASQ_CONFIG_FILE":       options.Settings.DNSMasqConfigFile,
-		"MSS_CLAMP":                 boolToScriptValue(options.Settings.MSSClamp),
-		"MSS_VALUE":                 strconv.Itoa(options.Settings.MSSValue),
-		"DNS_HIJACK":                boolToScriptValue(options.Settings.DNSHijack),
-		"IPV6_MODE":                 options.Settings.IPv6Mode,
-		"DOMAIN_STATS_CHAIN":        DomainStatsChainName(options.Settings.IPSetName),
-		"LEGACY_DOMAIN_STATS_CHAIN": LegacyDomainStatsChainName(options.Settings.IPSetName),
+		"DEVICE_BYPASS_FILE":          r.deviceExclusionsPath,
+		"DEVICE_BYPASS_CONNTRACK_IPS": strings.Join(options.ChangedDeviceIPs, " "),
+		"DOMAIN_LIST":                 domainListPath,
+		"DOMAIN_STATS_MAX_DOMAINS":    strconv.Itoa(DomainStatsMaxDomainsWithFallback(loadProfile.DomainStatsMaxDomains)),
+		"VPN_MANAGER_DOMAIN_STATS":    DomainStatsModeWithFallback(loadProfile.DomainStatsMode),
+		"PRIME_MAX_DOMAINS":           strconv.Itoa(resolveIntEnvWithFallback(loadProfile.PrimeMaxDomains, "VPN_MANAGER_PRIME_MAX_DOMAINS", "PRIME_MAX_DOMAINS")),
+		"IPSET_TIMEOUT":               strconv.Itoa(resolveIntEnvWithFallback(loadProfile.IPSetTimeout, "VPN_MANAGER_IPSET_TIMEOUT", "IPSET_TIMEOUT")),
+		"IPSET_FLUSH_ON_SYNC":         boolToScriptValue(resolveBoolEnvWithFallback(loadProfile.IPSetFlushOnSync, "VPN_MANAGER_IPSET_FLUSH_ON_SYNC", "IPSET_FLUSH_ON_SYNC")),
+		"CONNTRACK_FLUSH_ON_APPLY":    boolToScriptValue(resolveBoolEnvWithFallback(loadProfile.ConntrackFlushOnApply, "VPN_MANAGER_CONNTRACK_FLUSH_ON_APPLY", "CONNTRACK_FLUSH_ON_APPLY")),
+		"VPN_GATEWAY":                 options.Settings.VPNGateway,
+		"VPN_ROUTE_MODE":              options.Settings.VPNRouteMode,
+		"VPN_MASQUERADE":              boolToScriptValue(options.Settings.VPNMasquerade),
+		"LAN_IFACE":                   options.Settings.LANIface,
+		"VPN_IFACE":                   options.Settings.VPNIface,
+		"TABLE_NUM":                   strconv.Itoa(options.Settings.TableNum),
+		"FW_ZONE_CHAIN":               options.Settings.FWZoneChain,
+		"IPSET_NAME":                  options.Settings.IPSetName,
+		"FWMARK":                      options.Settings.FWMark,
+		"DNSMASQ_CONFIG_FILE":         options.Settings.DNSMasqConfigFile,
+		"MSS_CLAMP":                   boolToScriptValue(options.Settings.MSSClamp),
+		"MSS_VALUE":                   strconv.Itoa(options.Settings.MSSValue),
+		"DNS_HIJACK":                  boolToScriptValue(options.Settings.DNSHijack),
+		"IPV6_MODE":                   options.Settings.IPv6Mode,
+		"DOMAIN_STATS_CHAIN":          DomainStatsChainName(options.Settings.IPSetName),
+		"LEGACY_DOMAIN_STATS_CHAIN":   LegacyDomainStatsChainName(options.Settings.IPSetName),
 	}
 	if r.dnsProxyServer != "" {
 		envValues["DNS_PROXY_SERVER"] = r.dnsProxyServer

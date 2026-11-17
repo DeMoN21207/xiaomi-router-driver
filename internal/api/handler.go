@@ -144,6 +144,7 @@ func NewHandler(deps Dependencies) *Handler {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/devices", handler.handleDevices)
 	mux.HandleFunc("/api/status", handler.handleStatus)
 	mux.HandleFunc("/api/failover/status", handler.handleFailoverStatus)
 	mux.HandleFunc("/api/traffic/history", handler.handleTrafficHistory)

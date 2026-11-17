@@ -1,4 +1,5 @@
 const iconMap = {
+  devices: <><rect x="2" y="4" width="14" height="11" rx="2" /><path d="M6 19h6M9 15v4" /><rect x="16" y="10" width="6" height="11" rx="1.5" /><path d="M18 18h2" /></>,
   menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   dashboard: (
     <>

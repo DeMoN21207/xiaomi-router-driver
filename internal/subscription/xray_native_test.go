@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +67,20 @@ func TestMissingXrayPreservesActiveTunnel(t *testing.T) {
 func TestNativeXrayRollbackPreservesEngine(t *testing.T) {
 	m, state, dir := rollbackTestManager(t)
 	m.xrayBinary = filepath.Join(dir, "xray")
-	script := "#!/bin/sh\nprintf 'xray\\n' >> \"$SUBSCRIPTION_TEST_DIR/xray-starts\"\nexec sleep 120\n"
+	script := `#!/bin/sh
+printf 'xray\n' >> "$SUBSCRIPTION_TEST_DIR/xray-starts"
+iface=$(sed -n 's/.*"name": "\([^"]*\)".*/\1/p' "$3" | head -1)
+echo "$$" > "$SUBSCRIPTION_TEST_DIR/ready-$iface"
+exec sleep 120
+`
+	// A live process is not yet a ready TUN. The generic fixture reports every
+	// interface immediately, allowing fast apply/rollback to kill the mock
+	// before its shell has executed. Wait for this process's readiness marker.
+	interfaceAlive = func(iface string) bool {
+		data, _ := os.ReadFile(filepath.Join(dir, "ready-"+iface))
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		return pid > 0 && runtimehealth.ProcessAlive(pid)
+	}
 	if err := os.WriteFile(m.xrayBinary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

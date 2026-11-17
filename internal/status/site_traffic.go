@@ -769,6 +769,9 @@ func readConntrackSiteTraffic(state config.State, observedIPs map[string]string,
 
 		viaTunnel, routeLabel := matcher.resolve(domain)
 		identity := deviceIdentities[entry.srcIP]
+		if config.DeviceExcluded(state.ExcludedDevices, identity.MAC) {
+			viaTunnel, routeLabel = false, "direct"
+		}
 		entries = append(entries, siteTrafficConnection{
 			Key:        entry.key,
 			SourceIP:   entry.srcIP,

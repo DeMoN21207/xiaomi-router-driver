@@ -8,6 +8,7 @@ import GlobalProgress from "./GlobalProgress.jsx";
 const navItems = [
   { to: "/", icon: "dashboard", labelKey: "nav.dashboard" },
   { to: "/connections", icon: "vpn_lock", labelKey: "nav.connections" },
+  { to: "/devices", icon: "devices", labelKey: "nav.devices" },
   { to: "/traffic", icon: "bar_chart", labelKey: "nav.traffic" },
   { to: "/events", icon: "history", labelKey: "nav.events" },
   { to: "/settings", icon: "settings", labelKey: "nav.settings" },
@@ -16,6 +17,7 @@ const navItems = [
 const subtitleKeys = {
   "/": "topbar.management",
   "/connections": "topbar.connections",
+  "/devices": "topbar.devices",
   "/traffic": "topbar.traffic",
   "/events": "topbar.events",
   "/settings": "topbar.settings",
