@@ -7,5 +7,5 @@ data_dir=data
 openvpn_path=bin/openvpn
 singbox_path=bin/sing-box
 xray_path=bin/xray
-commit=db353ee-dirty
-built_at=2026-11-17T13:35:11Z
+commit=f77c086
+built_at=2026-11-17T18:51:17Z
