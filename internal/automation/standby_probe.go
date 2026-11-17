@@ -74,7 +74,15 @@ func (s *Supervisor) checkSubscriptionStandby(ctx context.Context, provider conf
 	if issue := subscription.EntryEndpointIssue(entry); issue != "" {
 		return providerProbeResult{Detail: issue}
 	}
-	return probeStandbyEntry(ctx, runtimebin.Resolve(os.Getenv("VPN_MANAGER_SINGBOX_BIN"), "sing-box", filepath.Dir(s.dataDir), s.dataDir), entry)
+	return probeStandbyEntry(ctx, subscriptionProbeBinary(s.dataDir, entry), entry)
+}
+
+func subscriptionProbeBinary(dataDir string, entry subscription.Entry) string {
+	name, env := "sing-box", "VPN_MANAGER_SINGBOX_BIN"
+	if entry.UsesXray() {
+		name, env = "xray", "VPN_MANAGER_XRAY_BIN"
+	}
+	return runtimebin.Resolve(os.Getenv(env), name, filepath.Dir(dataDir), dataDir)
 }
 
 // A short-lived loopback SOCKS listener verifies the actual outbound protocol
@@ -92,17 +100,7 @@ func probeStandbyEntry(ctx context.Context, binary string, entry subscription.En
 	address := listener.Addr().String()
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
-	outbound := make(map[string]any, len(entry.Outbound)+1)
-	for key, value := range entry.Outbound {
-		outbound[key] = value
-	}
-	outbound["tag"] = "proxy"
-	settings := map[string]any{
-		"log":       map[string]any{"disabled": true},
-		"inbounds":  []any{map[string]any{"type": "socks", "listen": "127.0.0.1", "listen_port": port}},
-		"outbounds": []any{outbound},
-		"route":     map[string]any{"final": "proxy", "auto_detect_interface": true},
-	}
+	settings := subscription.BuildProbeConfig(entry, port)
 	data, err := json.Marshal(settings)
 	if err != nil {
 		return providerProbeResult{Detail: "encode standby probe config failed"}

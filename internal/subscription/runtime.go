@@ -39,6 +39,7 @@ type Manager struct {
 	runtimeDir         string
 	legacyManifestPath string
 	singBoxBinary      string
+	xrayBinary         string
 	routing            *routing.Runner
 	recordEvent        func(level string, kind string, message string)
 	mu                 sync.Mutex
@@ -132,6 +133,7 @@ func NewManager(appDir string, dataDir string, db *sql.DB, routingRunner *routin
 		runtimeDir:         runtimeDir,
 		legacyManifestPath: filepath.Join(runtimeDir, "runtime.json"),
 		singBoxBinary:      singBoxBinary,
+		xrayBinary:         runtimebin.Resolve(os.Getenv("VPN_MANAGER_XRAY_BIN"), "xray", appDir, dataDir),
 		routing:            routingRunner,
 		recordEvent:        recordEvent,
 		current:            make(map[string]*managedInstance),
@@ -163,6 +165,13 @@ func (m *Manager) Apply(ctx context.Context, state config.State, enabledRules []
 	plans, err := m.buildApplyPlans(desired, state.Routing)
 	if err != nil {
 		return err
+	}
+	for _, plan := range plans {
+		if plan.desired.Entry.UsesXray() {
+			if _, err := exec.LookPath(m.xrayBinary); err != nil {
+				return fmt.Errorf("Xray is required for %s: %w", plan.desired.Location, err)
+			}
+		}
 	}
 	rollback, err := m.prepareRollback(ctx, existingInstances)
 	if err != nil {
@@ -322,10 +331,10 @@ func (m *Manager) startPlannedInstance(plan applyPlan) (*managedInstance, error)
 
 	if err := fileutil.WriteFileAtomic(plan.configPath, plan.configData, 0o600); err != nil {
 		removeIfExists(plan.domainListPath)
-		return nil, fmt.Errorf("write sing-box config for %s: %w", plan.desired.Location, err)
+		return nil, fmt.Errorf("write VPN config for %s: %w", plan.desired.Location, err)
 	}
 
-	cmd := exec.Command(m.singBoxBinary, "run", "-c", plan.configPath)
+	cmd := exec.Command(m.runtimeBinary(plan.configPath), "run", "-c", plan.configPath)
 	cmd.Dir = m.runtimeDir
 
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -344,7 +353,7 @@ func (m *Manager) startPlannedInstance(plan applyPlan) (*managedInstance, error)
 	if err := cmd.Start(); err != nil {
 		removeIfExists(plan.domainListPath)
 		removeIfExists(plan.configPath)
-		return nil, fmt.Errorf("start sing-box for %s: %w", plan.desired.Location, err)
+		return nil, fmt.Errorf("start VPN engine for %s: %w", plan.desired.Location, err)
 	}
 
 	done := make(chan struct{})
@@ -448,7 +457,7 @@ func (m *Manager) cleanupLocked(ctx context.Context) error {
 				_ = current.cmd.Process.Kill()
 			}
 		} else if instance.PID > 0 {
-			_, _ = runtimehealth.KillIfMatches(instance.PID, m.singBoxBinary, instance.ConfigPath)
+			_, _ = runtimehealth.KillIfMatches(instance.PID, m.runtimeBinary(instance.ConfigPath), instance.ConfigPath)
 		}
 
 		if err := m.routing.RunWithOptions(ctx, "del", routing.RunOptions{
@@ -502,17 +511,23 @@ func (m *Manager) buildApplyPlans(desired []desiredInstance, base config.Routing
 	for index, item := range desired {
 		hash := shortHash(item.Provider.ID + "\n" + item.Location)
 		settings := deriveRoutingSettings(base, hash, index)
-		configData, err := json.MarshalIndent(buildSingBoxConfig(settings.VPNIface, index, item.Entry.Outbound), "", "  ")
+		runtimeConfig := buildSingBoxConfig(settings.VPNIface, index, item.Entry.Outbound)
+		configPath := filepath.Join(m.runtimeDir, hash+".json")
+		if item.Entry.UsesXray() {
+			runtimeConfig = buildXrayTUNConfig(settings.VPNIface, index, item.Entry.Outbound)
+			configPath = filepath.Join(m.runtimeDir, hash+".xray.json")
+		}
+		configData, err := json.MarshalIndent(runtimeConfig, "", "  ")
 		if err != nil {
-			return nil, fmt.Errorf("marshal sing-box config for %s: %w", item.Location, err)
+			return nil, fmt.Errorf("marshal VPN config for %s: %w", item.Location, err)
 		}
 		configData = append(configData, '\n')
 
 		plans = append(plans, applyPlan{
 			desired:        item,
 			settings:       settings,
-			domainListPath: filepath.Join(m.runtimeDir, hash+".domains.list"),
-			configPath:     filepath.Join(m.runtimeDir, hash+".json"),
+			domainListPath: runtimeDomainListPath(configPath),
+			configPath:     configPath,
 			configData:     configData,
 		})
 	}
@@ -559,7 +574,7 @@ func (m *Manager) canReuseInstance(instance *managedInstance, plan applyPlan) bo
 			return true
 		}
 	}
-	return runtimehealth.ProcessAlive(instance.PID, m.singBoxBinary, instance.ConfigPath)
+	return runtimehealth.ProcessAlive(instance.PID, m.runtimeBinary(instance.ConfigPath), instance.ConfigPath)
 }
 
 func (m *Manager) applyRoutingToInstanceLocked(ctx context.Context, instance *managedInstance, plan applyPlan) error {
@@ -619,10 +634,10 @@ func (m *Manager) stopInstanceLocked(ctx context.Context, instance *managedInsta
 				}
 			}
 		} else if current.PID > 0 {
-			_, _ = runtimehealth.KillIfMatches(current.PID, m.singBoxBinary, current.ConfigPath)
+			_, _ = runtimehealth.KillIfMatches(current.PID, m.runtimeBinary(current.ConfigPath), current.ConfigPath)
 		}
 	} else if instance.PID > 0 {
-		_, _ = runtimehealth.KillIfMatches(instance.PID, m.singBoxBinary, instance.ConfigPath)
+		_, _ = runtimehealth.KillIfMatches(instance.PID, m.runtimeBinary(instance.ConfigPath), instance.ConfigPath)
 	}
 
 	if err := m.routing.RunWithOptions(ctx, "del", routing.RunOptions{
@@ -921,7 +936,7 @@ func (m *Manager) snapshotFromInstance(instance *managedInstance) RuntimeSnapsho
 	assessment := runtimehealth.Assess(runtimehealth.Check{
 		InterfaceName:        instance.InterfaceName,
 		PID:                  instance.PID,
-		ProcessMarkers:       []string{m.singBoxBinary, instance.ConfigPath},
+		ProcessMarkers:       []string{m.runtimeBinary(instance.ConfigPath), instance.ConfigPath},
 		EnableInterfaceProbe: false,
 	})
 

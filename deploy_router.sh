@@ -315,7 +315,7 @@ if [ -d "\$remote_dir" ]; then
   for name in vpn-manager start.sh README.md bundle-info.txt; do
     [ -f "\$remote_dir/\$name" ] && cp -p "\$remote_dir/\$name" "\$backup_dir/\$name"
   done
-  for name in openvpn sing-box; do
+  for name in openvpn sing-box xray xray-LICENSE; do
     [ -f "\$remote_dir/bin/\$name" ] && cp -p "\$remote_dir/bin/\$name" "\$backup_dir/bin/\$name"
   done
   echo "pre-deploy backup: \$backup_dir"
@@ -359,7 +359,7 @@ for name in start.sh README.md bundle-info.txt; do
 done
 
 echo "[4/7] Uploading bundled runtime binaries..."
-for name in openvpn sing-box; do
+for name in openvpn sing-box xray xray-LICENSE; do
   if [[ -f "$ROUTER_PACKAGE_DIR/bin/$name" ]]; then
     scp_to "$ROUTER_PACKAGE_DIR/bin/$name" "$ROUTER_REMOTE_DIR/bin/$name"
   fi
@@ -385,6 +385,7 @@ chmod +x "\$binary"
 [ -f start.sh ] && chmod +x start.sh
 [ -f bin/openvpn ] && chmod +x bin/openvpn
 [ -f bin/sing-box ] && chmod +x bin/sing-box
+[ -f bin/xray ] && chmod +x bin/xray
 rm -f "/tmp/\$service.pid"
 export VPN_MANAGER_ROOT="\$remote_dir"
 export VPN_MANAGER_PORT="\$http_port"

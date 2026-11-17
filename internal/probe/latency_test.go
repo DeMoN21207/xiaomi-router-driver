@@ -1,6 +1,31 @@
 package probe
 
-import "testing"
+import (
+	"context"
+	"net"
+	"testing"
+)
+
+func TestResolvePingTargetRejectsSinkholeAndLoopbackDNS(t *testing.T) {
+	for _, addresses := range [][]string{{"0.0.0.0"}, {"127.0.0.1"}, {"::"}, {"::1"}, {"224.0.0.1"}, {"169.254.1.1"}} {
+		lookup := func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP(addresses[0])}}, nil
+		}
+		if target, err := resolvePingTarget(t.Context(), "blocked.example", lookup); err == nil || target != "" {
+			t.Fatalf("DNS %v would ping the router: target=%q error=%v", addresses, target, err)
+		}
+	}
+}
+
+func TestResolvePingTargetPinsUsableResolvedAddress(t *testing.T) {
+	lookup := func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("::1")}, {IP: net.ParseIP("2001:db8::20")}, {IP: net.ParseIP("203.0.113.20")}}, nil
+	}
+	target, err := resolvePingTarget(t.Context(), "vpn.example", lookup)
+	if err != nil || target != "203.0.113.20" {
+		t.Fatalf("target=%q err=%v", target, err)
+	}
+}
 
 func TestExtractHost(t *testing.T) {
 	tests := []struct {

@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,5 +59,37 @@ func TestStandbyProbeReapsProcessWhenListenerNeverStarts(t *testing.T) {
 	}
 	if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
 		t.Fatalf("standby process %d survived cleanup: %v", pid, err)
+	}
+}
+
+func TestStandbyProbeUsesNativeXrayConfig(t *testing.T) {
+	dir := t.TempDir()
+	captured := filepath.Join(dir, "captured.json")
+	binary := filepath.Join(dir, "xray")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\ncp \"$3\" '"+captured+"'\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	entry := subscription.Entry{Outbound: map[string]any{"protocol": "vless", "tag": "proxy", "settings": map[string]any{"address": "example.com", "port": 443, "id": "test"}, "streamSettings": map[string]any{"network": "xhttp"}}}
+	result := probeStandbyEntry(t.Context(), binary, entry)
+	if result.Healthy {
+		t.Fatal("exited engine was marked healthy")
+	}
+	raw, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	inbound := cfg["inbounds"].([]any)[0].(map[string]any)
+	if inbound["protocol"] != "socks" || inbound["listen"] != "127.0.0.1" {
+		t.Fatalf("wrong native probe inbound: %+v", inbound)
+	}
+	if _, exists := cfg["route"]; exists {
+		t.Fatal("sing-box settings leaked into Xray config")
+	}
+	if cfg["outbounds"].([]any)[0].(map[string]any)["protocol"] != "vless" {
+		t.Fatal("native outbound lost")
 	}
 }

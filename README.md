@@ -10,6 +10,14 @@ Linux-first router bundle for running `vpn-manager` on OpenWrt/Xiaomi routers.
 - Linux bundle build scripts in `build.*` and `package_router.*`
 - Ready-to-copy router bundle in `build/router`
 
+Subscriptions accept URI/Base64 lists, sing-box JSON, and Xray JSON configs
+(including arrays with per-location `remarks`). Xray import supports VLESS over
+TCP/RAW with TLS/REALITY and Hysteria2 with optional Salamander obfuscation.
+XHTTP and VLESS Encryption run through native Xray, preserving nested download
+settings and finalmask. Each endpoint uses one TUN engine; policy routes remain
+managed by the application. Unsupported chains are excluded. Legacy
+client warnings are filtered, with alternate fetch profiles used when needed.
+
 ## Build
 
 The primary build target is the router bundle in `build/router`.
@@ -30,7 +38,11 @@ The deploy script can also read the existing Windows-style `deploy_router.local.
 
 ## Runtime binaries
 
-The application expects Linux `openvpn` and `sing-box` binaries on the router.
+The application uses Linux `openvpn`, `sing-box`, and `xray` binaries on the router.
+Run `bash fetch_xray.sh` to download the pinned, checksum-verified Xray v26.11.9
+Linux arm64 release before packaging. `ROUTER_XRAY_BIN` can override its path;
+`VPN_MANAGER_XRAY_BIN` overrides the executable at runtime. Older update bundles
+without Xray remain compatible, but native endpoints need the new engine.
 
 They can be provided in one of these ways:
 

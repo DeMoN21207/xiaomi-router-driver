@@ -90,7 +90,7 @@ func FetchEntriesCachedContext(ctx context.Context, source string, runtimeDir st
 	if cacheTTL > 0 {
 		if snapshot, ok := loadEntriesCache(cachePath, source); ok && snapshot.isFresh(cacheTTL) {
 			entries, err := ParseEntries(snapshot.Raw)
-			if err == nil && entriesLookUsable(entries) {
+			if err == nil && entriesLookUsable(entries) && !subscriptionHasCompatibilityWarnings(snapshot.Raw) {
 				return entries, entriesFetchFreshCache, nil
 			}
 		}
@@ -249,6 +249,8 @@ func fetchEntriesLive(ctx context.Context, source subscriptionSource, retryFetch
 
 	profiles := subscriptionFetchProfiles()
 	var lastErr error
+	var fallbackEntries []Entry
+	var fallbackRaw string
 	for _, profile := range profiles {
 		if err := ctx.Err(); err != nil {
 			return nil, "", err
@@ -263,7 +265,14 @@ func fetchEntriesLive(ctx context.Context, source subscriptionSource, retryFetch
 		}
 		entries, err := ParseEntries(raw)
 		if err == nil && entriesLookUsable(entries) {
-			return entries, raw, nil
+			if !subscriptionHasCompatibilityWarnings(raw) {
+				return entries, raw, nil
+			}
+			// Keep working legacy endpoints if no profile can obtain a complete
+			// subscription. Warning rows themselves are removed by ParseEntries.
+			if len(entries) > len(fallbackEntries) {
+				fallbackEntries, fallbackRaw = entries, raw
+			}
 		}
 		if err == nil {
 			err = errors.New("subscription returned only compatibility placeholder entries")
@@ -271,6 +280,12 @@ func fetchEntriesLive(ctx context.Context, source subscriptionSource, retryFetch
 		lastErr = err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if len(fallbackEntries) > 0 {
+		return fallbackEntries, fallbackRaw, nil
+	}
 	if lastErr == nil {
 		lastErr = errors.New("subscription fetch profiles are not configured")
 	}
@@ -359,7 +374,12 @@ func normalizeSubscriptionSource(source string) (subscriptionSource, error) {
 
 func subscriptionFetchProfiles() []subscriptionFetchProfile {
 	return []subscriptionFetchProfile{
-		{},
+		{
+			// A versioned JSON-capable profile avoids legacy URI responses that
+			// omit reserves. Keep the older profiles below for other providers.
+			UserAgent: "Throne/1.4.2",
+			Accept:    "application/json, text/plain, */*",
+		},
 		{
 			UserAgent:     "Happ",
 			Accept:        "application/json, text/plain, */*",
@@ -397,6 +417,7 @@ func subscriptionFetchProfiles() []subscriptionFetchProfile {
 			Accept:        "text/yaml, application/yaml, text/plain, */*",
 			DeviceHeaders: true,
 		},
+		{},
 	}
 }
 
@@ -414,10 +435,32 @@ func entriesLookUsable(entries []Entry) bool {
 
 func isCompatibilityPlaceholderEntry(entry Entry) bool {
 	address := strings.TrimSpace(entry.Address)
-	if address != "0.0.0.0:1" && address != "[::]:1" {
-		return false
+	if address == "0.0.0.0:1" || address == "[::]:1" {
+		return true
 	}
-	return true
+	return isCompatibilityWarningName(entry.Name)
+}
+
+func isCompatibilityWarningName(name string) bool {
+	name = strings.ToLower(strings.Join(strings.Fields(name), " "))
+	for _, warning := range []string{
+		"клиент устарел", "клиент не поддерживается", "не поддерживает json",
+		"часть резервов будет недоступна", "резервы будут недоступны",
+	} {
+		if strings.Contains(name, warning) {
+			return true
+		}
+	}
+	return false
+}
+
+func subscriptionHasCompatibilityWarnings(raw string) bool {
+	for _, line := range strings.Split(decodeSubscriptionPayload(raw), "\n") {
+		if entry, err := ParseLine(line); err == nil && isCompatibilityWarningName(entry.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 func looksLikeInlineSubscription(source string) bool {

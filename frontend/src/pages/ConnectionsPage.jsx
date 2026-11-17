@@ -206,6 +206,7 @@ export default function ConnectionsPage() {
   const fileInputRef = useRef(null);
 
   const [section, setSection] = useState("active");
+  const [overviewEditing, setOverviewEditing] = useState(false);
   const [editorMode, setEditorMode] = useState("domains");
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [selectedRuleId, setSelectedRuleId] = useState("");
@@ -226,6 +227,13 @@ export default function ConnectionsPage() {
     setSelectedRuleId(row.ruleId || "");
     setEditorMode(mode);
     setSection("routing");
+  }
+
+  function changeSection(next) {
+    if (busy || next === section) return;
+    if (overviewEditing && !window.confirm(t("connections.discardSiteChanges"))) return;
+    setOverviewEditing(false);
+    setSection(next);
   }
 
   const showToast = useCallback((message, error = false) => {
@@ -476,7 +484,7 @@ export default function ConnectionsPage() {
   }
 
   return (
-    <div className="min-w-0 space-y-8 overflow-x-clip">
+    <div className="min-w-0 space-y-5 overflow-x-clip">
       <header className="flex flex-col justify-between gap-6 md:flex-row md:items-end">
         <div>
           <h1 className="font-headline text-3xl font-bold tracking-tight text-on-surface">{t("connections.workspaceTitle")}</h1>
@@ -494,10 +502,10 @@ export default function ConnectionsPage() {
         </div>
       </header>
 
-      <SectionTabs idPrefix="connection-sections" label={t("connections.workspaceTitle")} value={section} onChange={setSection} items={[
+      <SectionTabs idPrefix="connection-sections" label={t("connections.workspaceTitle")} value={section} onChange={changeSection} items={[
         { id: "active", label: t("connections.sectionActive"), shortLabel: t("connections.sectionActiveShort") },
-        { id: "routing", label: t("connections.sectionRouting"), shortLabel: t("connections.sectionRoutingShort") },
         { id: "catalog", label: t("connections.sectionCatalog"), shortLabel: t("connections.sectionCatalogShort") },
+        { id: "routing", label: t("connections.sectionRouting"), shortLabel: t("connections.sectionRoutingShort") },
       ]} />
 
       {pageError ? <InlineNotice tone="error" title={t("error.connections")} message={pageError} /> : null}
@@ -611,7 +619,7 @@ export default function ConnectionsPage() {
       )}
 
       {section === "active" && configLoaded && <div role="tabpanel" id="connection-sections-panel-active" aria-labelledby="connection-sections-tab-active">
-        <RoutingOverview config={config} statusMap={priorityStatusMap} failoverMap={failoverOverrideMap} busy={busy} onChanged={refresh} onConfigure={configureRoute} showToast={showToast} setPageError={setPageError} t={t} />
+        <RoutingOverview config={config} statusMap={priorityStatusMap} failoverMap={failoverOverrideMap} busy={busy} setBusy={setBusy} onChanged={refresh} onConfigure={configureRoute} onEditingChange={setOverviewEditing} showToast={showToast} setPageError={setPageError} t={t} />
       </div>}
 
       {section !== "active" && <div role="tabpanel" id={`connection-sections-panel-${section}`} aria-labelledby={`connection-sections-tab-${section}`} className="space-y-6">
@@ -1524,7 +1532,7 @@ function LocationsBrowser({ locations, selectedLocation = "", onSelect, usedLoca
   }
 
   return (
-    <div className="space-y-3">
+    <div className="@container space-y-3">
       <div className="flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
         <label className="relative block flex-1">
           <Icon name="search" className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-outline-variant" />
@@ -1543,8 +1551,11 @@ function LocationsBrowser({ locations, selectedLocation = "", onSelect, usedLoca
 
       {visibleLocations.length > 0 ? (
         <>
+          <div className="grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-outline-variant/10 @min-[640px]:hidden">
+            {[['name', 'connections.locationNameColumn'], ['address', 'connections.locationAddressColumn'], ['ping', 'connections.locationPingColumn']].map(([key, label]) => <SortHeader key={key} label={t(label)} columnKey={key} activeSortKey={sortKey} direction={sortDirection} onToggle={toggleSort} />)}
+          </div>
           <div className="overflow-hidden rounded-lg border border-outline-variant/10">
-            <div className="grid grid-cols-[110px_minmax(180px,1fr)_minmax(220px,1.3fr)_110px] gap-px bg-outline-variant/10 text-[11px] font-bold uppercase tracking-widest text-outline">
+            <div className="hidden @min-[640px]:grid grid-cols-[84px_minmax(140px,1fr)_minmax(180px,1.3fr)_90px] gap-px bg-outline-variant/10 text-[11px] font-bold uppercase tracking-widest text-outline">
               <div className="bg-surface-container-high px-3 py-2">{t("connections.locationTypeColumn")}</div>
               <SortHeader
                 label={t("connections.locationAddressColumn")}
@@ -1569,7 +1580,7 @@ function LocationsBrowser({ locations, selectedLocation = "", onSelect, usedLoca
                 align="right"
               />
             </div>
-            <div className="max-h-72 overflow-auto bg-surface-container-lowest/40">
+            <div className="max-h-[60vh] overflow-auto bg-surface-container-lowest/40">
               {visibleLocations.map((loc) => {
                 const active = selectedLocation === loc.name;
                 const alreadyUsed = selectedSet.has(loc.name);
@@ -1584,19 +1595,19 @@ function LocationsBrowser({ locations, selectedLocation = "", onSelect, usedLoca
                     onClick={canSelect ? () => onSelect(loc.name) : undefined}
                     disabled={!interactive || disabled || Boolean(endpointError)}
                     title={endpointError || undefined}
-                    className={`grid w-full grid-cols-[110px_minmax(180px,1fr)_minmax(220px,1.3fr)_110px] gap-px border-t border-outline-variant/10 text-left text-sm transition-colors ${
+                    className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-x-2 gap-y-1 px-3 py-3 @min-[640px]:grid-cols-[84px_minmax(140px,1fr)_minmax(180px,1.3fr)_90px] @min-[640px]:gap-px @min-[640px]:p-0 border-t border-outline-variant/10 text-left text-sm transition-colors ${
                       interactive ? "hover:bg-surface-container/70 disabled:cursor-default disabled:hover:bg-transparent" : "cursor-default"
                     } ${active ? "bg-primary/8" : "bg-transparent"} ${endpointError ? "opacity-60" : ""}`}
                   >
-                    <div className="px-3 py-2.5 text-on-surface-variant">
+                    <div className="order-3 min-w-0 @min-[640px]:order-none @min-[640px]:px-3 @min-[640px]:py-2.5 text-on-surface-variant">
                       <span className="rounded bg-surface-container-highest px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-on-surface">
                         {formatLocationType(loc.type)}
                       </span>
                     </div>
-                    <div className="px-3 py-2.5 font-mono text-xs text-on-surface">{loc.address || "—"}</div>
-                    <div className="px-3 py-2.5 text-on-surface">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate">{loc.name}</span>
+                    <div className="order-2 col-span-2 min-w-0 break-all @min-[640px]:order-none @min-[640px]:col-span-1 @min-[640px]:px-3 @min-[640px]:py-2.5 font-mono text-xs text-on-surface-variant">{loc.address || "—"}</div>
+                    <div className="order-1 col-span-2 min-w-0 @min-[640px]:order-none @min-[640px]:col-span-1 @min-[640px]:px-3 @min-[640px]:py-2.5 text-on-surface">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                        <span className="min-w-0 [overflow-wrap:anywhere]">{loc.name}</span>
                         {active ? (
                           <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-primary">
                             {t("connections.locationSelected")}
@@ -1615,7 +1626,7 @@ function LocationsBrowser({ locations, selectedLocation = "", onSelect, usedLoca
                       </div>
                     </div>
                     <div
-                      className="px-3 py-2.5 text-right font-mono text-xs"
+                      className="order-4 min-w-0 @min-[640px]:order-none @min-[640px]:px-3 @min-[640px]:py-2.5 text-right font-mono text-xs"
                       title={loc.latencyError || undefined}
                     >
                       <LocationLatency location={loc} t={t} />
@@ -1642,7 +1653,7 @@ function SortHeader({ label, columnKey, activeSortKey, direction, onToggle, alig
     <button
       type="button"
       onClick={() => onToggle(columnKey)}
-      className={`flex items-center gap-1.5 bg-surface-container-high px-3 py-2 text-left transition-colors hover:bg-surface-container-highest ${
+      className={`flex min-h-11 items-center gap-1.5 bg-surface-container-high px-3 py-2 text-left transition-colors hover:bg-surface-container-highest ${
         align === "right" ? "justify-end text-right" : "justify-between"
       }`}
     >
@@ -1714,6 +1725,9 @@ function compareText(left, right) {
 function LocationLatency({ location, t }) {
   if (location?.endpointError) {
     return <span className="text-error">{t("connections.locationUnavailableShort")}</span>;
+  }
+  if (location?.latencyError) {
+    return <span className="text-error" title={location.latencyError}>{t("connections.pingUnavailable")}</span>;
   }
   const ms = location?.latencyMs;
   if (!(ms > 0)) {

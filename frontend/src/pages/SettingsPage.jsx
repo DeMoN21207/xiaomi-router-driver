@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { fetchJSON } from "../api.js";
 import { DASHBOARD_REFRESH_OPTIONS, readDashboardRefreshInterval, writeDashboardRefreshInterval } from "../dashboardPreferences.js";
 import { useI18n, languages } from "../i18n.jsx";
@@ -982,13 +982,15 @@ function RankBadge({ rank }) {
 }
 
 function TextInput({ label, value, onChange, type = "text", placeholder = "", hint = "" }) {
+  const id = useId();
   return (
-    <label className="block">
+    <label htmlFor={id} className="block">
       <span className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-outline">
         {label}
         {hint && <HintIcon hint={hint} />}
       </span>
       <input
+        id={id}
         type={type}
         value={value}
         placeholder={placeholder}
@@ -1000,13 +1002,15 @@ function TextInput({ label, value, onChange, type = "text", placeholder = "", hi
 }
 
 function SelectInput({ label, value, onChange, options, hint = "" }) {
+  const id = useId();
   return (
-    <label className="block">
+    <label htmlFor={id} className="block">
       <span className="mb-1.5 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-outline">
         {label}
         {hint && <HintIcon hint={hint} />}
       </span>
       <select
+        id={id}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className="w-full rounded-xl border border-outline-variant/20 bg-surface-container px-3 py-2.5 text-sm text-on-surface outline-none transition-colors focus:border-primary/40"
@@ -1022,25 +1026,39 @@ function SelectInput({ label, value, onChange, options, hint = "" }) {
 }
 
 function ToggleField({ label, checked, onChange, hint = "" }) {
+  const id = useId();
   return (
-    <label className="flex items-center justify-between rounded-lg bg-surface-container p-3">
+    <label htmlFor={id} className="flex items-center justify-between rounded-lg bg-surface-container p-3">
       <span className="flex items-center gap-1.5 text-sm text-on-surface">
         {label}
         {hint && <HintIcon hint={hint} />}
       </span>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4 accent-primary" />
+      <input id={id} type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4 accent-primary" />
     </label>
   );
 }
 
 function HintIcon({ hint }) {
+  const id = useId();
+  const [position, setPosition] = useState(null);
+  const show = event => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = Math.min(288, window.innerWidth - 32);
+    setPosition({ width, left: Math.max(16, Math.min(rect.left, window.innerWidth - width - 16)), top: Math.min(rect.bottom + 8, window.innerHeight - 256) });
+  };
+  useEffect(() => {
+    if (!position) return;
+    const close = () => setPosition(null);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => { window.removeEventListener("resize", close); window.removeEventListener("scroll", close, true); };
+  }, [position]);
   return (
-    <span className="group relative inline-flex cursor-help" onClick={(e) => e.preventDefault()}>
-      <Icon name="help_outline" className="h-3.5 w-3.5 text-outline-variant transition-colors group-hover:text-primary" />
-      <span className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 w-64 -translate-x-1/2 rounded-xl border border-primary/30 bg-surface-container-highest px-4 py-3 text-[11px] font-normal normal-case leading-relaxed tracking-normal text-on-surface opacity-0 shadow-2xl shadow-black/40 ring-1 ring-white/5 backdrop-blur-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
-        {hint}
-        <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-primary/30" />
-      </span>
+    <span className="inline-flex shrink-0">
+      <button type="button" aria-label={hint} aria-describedby={position ? id : undefined} onFocus={show} onBlur={() => setPosition(null)} onMouseEnter={show} onMouseLeave={event => { if (document.activeElement !== event.currentTarget) setPosition(null); }} onClick={event => { event.preventDefault(); show(event); }} onKeyDown={event => { if (event.key === "Escape") setPosition(null); }} className="-my-3 flex h-11 w-11 shrink-0 cursor-help items-center justify-center rounded-lg text-outline hover:text-primary focus-visible:outline-2 focus-visible:outline-primary">
+        <Icon name="help_outline" className="h-4 w-4" />
+      </button>
+      {position && <span id={id} role="tooltip" style={position} className="pointer-events-none fixed z-[60] max-h-60 overflow-auto rounded-xl border border-primary/30 bg-surface-container-highest px-4 py-3 text-xs font-normal normal-case leading-relaxed tracking-normal text-on-surface shadow-xl">{hint}</span>}
     </span>
   );
 }

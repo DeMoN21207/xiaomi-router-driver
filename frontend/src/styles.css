@@ -97,6 +97,23 @@
 .status-glow-error { box-shadow: 0 0 8px #ffb4ab; }
 .status-glow-warning { box-shadow: 0 0 8px #ffb95f; }
 
+/* Keep each traffic record readable without sideways scrolling on phones. */
+.traffic-table-shell { container-type: inline-size; container-name: traffic-table; }
+@container traffic-table (max-width: 639px) {
+  .traffic-table, .traffic-table thead, .traffic-table tbody { display: block; width: 100%; }
+  .traffic-table thead tr { display: flex; justify-content: space-between; }
+  .traffic-table thead th { display: none; }
+  .traffic-table thead th:nth-child(2), .traffic-table thead th:nth-child(4) { display: block; padding: 0.75rem; }
+  .traffic-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.5rem; padding: 1rem; }
+  .traffic-table tbody td { min-width: 0; padding: 0; }
+  .traffic-table tbody td:first-child { display: none; }
+  .traffic-table tbody td:nth-child(5), .traffic-table tbody td:nth-child(6), .traffic-table tbody td:nth-child(7) { display: none; }
+  .traffic-table tbody td:nth-child(2), .traffic-table tbody td:last-child { grid-column: 1 / -1; }
+  .traffic-table tbody td:nth-child(2) :is(button, span) { overflow-wrap: anywhere; max-width: 100%; }
+  .traffic-table tbody td:nth-child(4)::before { content: attr(data-label); display: block; color: var(--color-on-surface-variant); font: 0.625rem var(--font-body); }
+  .traffic-table tbody td:last-child { margin-top: 0.5rem; }
+}
+
 @keyframes progress-slide {
   0%   { transform: translateX(-100%); }
   100% { transform: translateX(100%); }

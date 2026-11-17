@@ -10,6 +10,6 @@ export default function SectionTabs({ items, value, onChange, label, idPrefix })
       event.preventDefault();
       onChange(items[next].id);
       event.currentTarget.parentElement.querySelectorAll('[role="tab"]')[next].focus();
-    }} className={`shrink-0 border-b-2 px-3 py-3 text-sm font-medium transition-colors sm:px-4 ${value === item.id ? "border-primary text-primary" : "border-transparent text-on-surface-variant hover:text-on-surface"}`}><span className={item.shortLabel ? "hidden sm:inline" : ""}>{item.label}</span>{item.shortLabel && <span className="sm:hidden">{item.shortLabel}</span>}</button>)}
+    }} className={`min-h-11 shrink-0 border-b-2 px-2 py-3 text-xs font-medium transition-colors sm:px-4 sm:text-sm ${value === item.id ? "border-primary text-primary" : "border-transparent text-on-surface-variant hover:text-on-surface"}`}><span className={item.shortLabel ? "hidden sm:inline" : ""}>{item.label}</span>{item.shortLabel && <span className="sm:hidden">{item.shortLabel}</span>}</button>)}
   </div>;
 }

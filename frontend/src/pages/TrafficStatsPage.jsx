@@ -498,7 +498,7 @@ export default function TrafficStatsPage() {
 
       <section id="traffic-sites" className="space-y-4">
         <div className="flex flex-wrap items-center gap-4">
-          <div className="relative min-w-[260px] flex-1">
+          <div className="relative min-w-0 w-full sm:min-w-[260px] sm:w-auto flex-1">
             <Icon name="search" className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-outline" />
             <input
               type="text"
@@ -509,7 +509,7 @@ export default function TrafficStatsPage() {
             />
           </div>
 
-          <div className="relative min-w-[260px]">
+          <div className="relative min-w-0 w-full sm:min-w-[260px] sm:w-auto">
             <Icon name="settings_ethernet" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-outline" />
             <label htmlFor="traffic-device-filter" className="sr-only">{t("trafficStats.deviceFilter")}</label>
             <select
@@ -573,8 +573,8 @@ export default function TrafficStatsPage() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+              <div className="traffic-table-shell overflow-x-auto">
+                <table className="traffic-table w-full text-sm">
                   <thead>
                     <tr className="border-b border-outline-variant/10 bg-surface-container text-left">
                       <th className="px-5 py-3 text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">#</th>
@@ -631,7 +631,7 @@ export default function TrafficStatsPage() {
                           <td className="px-5 py-3">
                             <RouteBadge item={item} t={t} />
                           </td>
-                          <td className="px-5 py-3 text-right font-mono text-on-surface">{formatBytes(item.bytes)}</td>
+                          <td data-label={t("trafficStats.traffic")} className="px-5 py-3 text-right font-mono text-on-surface">{formatBytes(item.bytes)}</td>
                           <td className="hidden px-5 py-3 text-right font-mono text-on-surface-variant lg:table-cell">
                             {item.packets.toLocaleString()}
                           </td>

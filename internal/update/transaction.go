@@ -90,6 +90,7 @@ func RestoreRuntimeBackup(appDir string, backupDir string) error {
 	for _, name := range executableBundlePaths {
 		_ = os.Chmod(filepath.Join(appDir, name), 0o755)
 	}
+	_ = os.Chmod(filepath.Join(appDir, "bin/xray"), 0o755)
 	return tx.commit()
 }
 

@@ -54,6 +54,8 @@ func installBundle(appDir string, dataDir string, bundle BundleInfo, now time.Ti
 	for _, name := range executableBundlePaths {
 		_ = os.Chmod(filepath.Join(appDir, name), 0o755)
 	}
+	// Xray is optional in older bundles and recovery snapshots.
+	_ = os.Chmod(filepath.Join(appDir, "bin/xray"), 0o755)
 	if err := tx.commit(); err != nil {
 		return "", err
 	}

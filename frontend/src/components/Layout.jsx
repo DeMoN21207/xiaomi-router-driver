@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { fetchJSON } from "../api.js";
 import { useI18n } from "../i18n.jsx";
@@ -27,6 +27,26 @@ export default function Layout() {
   const subtitleKey = subtitleKeys[location.pathname];
   const [bundle, setBundle] = useState(null);
   const [uptimeBase, setUptimeBase] = useState(null);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileMenu = useRef(null);
+
+  useEffect(() => { setMobileOpen(false); }, [location.pathname]);
+
+  useEffect(() => {
+    const menu = mobileMenu.current;
+    if (!mobileOpen) { if (menu?.open) menu.close(); return; }
+    menu.showModal();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const desktop = window.matchMedia("(min-width: 768px)");
+    const closeOnDesktop = () => { if (desktop.matches) setMobileOpen(false); };
+    desktop.addEventListener("change", closeOnDesktop);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      desktop.removeEventListener("change", closeOnDesktop);
+      if (menu.open) menu.close();
+    };
+  }, [mobileOpen]);
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem("sidebarCollapsed") === "1";
@@ -108,35 +128,49 @@ export default function Layout() {
           )}
         </div>
 
-        <nav className="flex-1 space-y-1">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              title={collapsed ? t(item.labelKey) : undefined}
-              className={({ isActive }) =>
-                `flex items-center ${collapsed ? "justify-center px-2" : "px-4"} py-3 my-1 font-headline uppercase tracking-wider text-xs transition-all duration-200 ${
-                  isActive
-                    ? "bg-surface-container-high text-primary border-r-4 border-secondary"
-                    : "text-outline hover:bg-surface-container-high hover:text-white" + (collapsed ? "" : " hover:translate-x-1")
-                }`
-              }
-            >
-              <Icon name={item.icon} className={`${collapsed ? "" : "mr-3"} h-5 w-5 shrink-0`} />
-              {!collapsed && t(item.labelKey)}
-            </NavLink>
-          ))}
-        </nav>
+        <NavigationLinks collapsed={collapsed} t={t} />
 
         <SidebarClock collapsed={collapsed} uptimeBase={uptimeBase} t={t} />
       </aside>
 
+      <dialog
+        ref={mobileMenu}
+        id="mobile-navigation"
+        aria-label={t("nav.navigation")}
+        onClose={event => { if (!event.currentTarget.open) setMobileOpen(false); }}
+        onCancel={() => setMobileOpen(false)}
+        onKeyDown={event => {
+          if (event.key !== "Tab") return;
+          const controls = event.currentTarget.querySelectorAll("a[href], button:not([disabled])");
+          const first = controls[0], last = controls[controls.length - 1];
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        }}
+        onClick={event => {
+          if (event.target !== event.currentTarget) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) setMobileOpen(false);
+        }}
+        className="fixed inset-y-0 left-0 right-auto m-0 h-dvh max-h-none w-[min(20rem,85vw)] max-w-none overflow-y-auto border-r border-outline-variant/20 bg-surface-container-low p-4 text-on-surface shadow-2xl backdrop:bg-black/60"
+      >
+        <div className="mb-6 flex items-center justify-between gap-2">
+          <span className="font-headline font-bold text-primary">RouteVPN Manager</span>
+          <button type="button" autoFocus onClick={() => setMobileOpen(false)} aria-label={t("nav.close")} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg hover:bg-surface-container-high focus-visible:outline-2 focus-visible:outline-primary">
+            <Icon name="close" className="h-6 w-6" />
+          </button>
+        </div>
+        <NavigationLinks t={t} onNavigate={() => setMobileOpen(false)} />
+        <BundleVersionBadge bundle={bundle} t={t} className="mt-6 max-w-full" />
+      </dialog>
+
       {/* Top Bar */}
-      <header className={`fixed top-0 right-0 left-0 ${topbarOffset} z-50 bg-surface flex justify-between items-center px-6 md:px-8 py-3 h-16 border-b border-outline-variant/10 transition-[left] duration-200`}>
-        <div className="flex items-center gap-4">
+      <header className={`fixed top-0 right-0 left-0 ${topbarOffset} z-50 bg-surface flex justify-between items-center gap-3 px-4 sm:px-6 md:px-8 py-3 h-16 border-b border-outline-variant/10 transition-[left] duration-200`}>
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" aria-label={t("nav.open")} aria-controls="mobile-navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen(true)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-primary hover:bg-surface-container-high focus-visible:outline-2 focus-visible:outline-primary md:hidden">
+            <Icon name="menu" className="h-6 w-6" />
+          </button>
           {subtitleKey ? (
-            <span className="font-headline text-xl font-bold text-primary tracking-widest uppercase">
+            <span className="truncate font-headline text-sm sm:text-base lg:text-xl font-bold text-primary tracking-wide uppercase">
               {t(subtitleKey)}
             </span>
           ) : (
@@ -146,18 +180,28 @@ export default function Layout() {
           )}
         </div>
 
-        <BundleVersionBadge bundle={bundle} t={t} className="max-w-[42vw] md:max-w-xs" />
+        <BundleVersionBadge bundle={bundle} t={t} className="!hidden sm:!inline-flex max-w-[30vw] md:max-w-xs shrink-0" />
 
       </header>
 
       {/* Main Content */}
-      <main className={`${contentOffset} pt-24 pb-12 px-6 md:px-8 min-h-screen transition-[margin] duration-200`}>
-        <div className="max-w-7xl mx-auto">
+      <main className={`${contentOffset} pt-20 sm:pt-24 pb-12 px-4 sm:px-6 md:px-8 min-w-0 min-h-screen transition-[margin] duration-200`}>
+        <div className="min-w-0 max-w-7xl mx-auto">
           <Outlet />
         </div>
       </main>
     </div>
   );
+}
+
+function NavigationLinks({ collapsed = false, t, onNavigate }) {
+  return <nav aria-label={t("nav.navigation")} className="flex-1 space-y-1">
+    {navItems.map(item => <NavLink key={item.to} to={item.to} end={item.to === "/"} onClick={onNavigate} title={collapsed ? t(item.labelKey) : undefined}
+      className={({isActive}) => `flex min-h-11 items-center gap-3 rounded-lg ${collapsed ? "justify-center px-2" : "px-4"} py-3 font-headline text-sm transition-colors focus-visible:outline-2 focus-visible:outline-primary ${isActive ? "bg-primary/10 text-primary" : "text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"}`}>
+      <Icon name={item.icon} className="h-5 w-5 shrink-0" />
+      {!collapsed && t(item.labelKey)}
+    </NavLink>)}
+  </nav>;
 }
 
 function BundleVersionBadge({ bundle, t, className = "" }) {

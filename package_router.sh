@@ -16,6 +16,7 @@ PACKAGE_TEMPLATE_DIR="$ROOT_DIR/packaging/router"
 : "${ROUTER_DATA_DIR_NAME:=data}"
 : "${ROUTER_OPENVPN_BIN:=}"
 : "${ROUTER_SINGBOX_BIN:=}"
+: "${ROUTER_XRAY_BIN:=$ROOT_DIR/.tools/xray/v26.11.9/linux/xray}"
 : "${ROUTER_VERSION:=}"
 : "${ROUTER_COMMIT:=}"
 : "${ROUTER_BUILT_AT:=}"
@@ -125,6 +126,16 @@ fi
 
 chmod +x "$ROUTER_PACKAGE_DIR/bin/"* 2>/dev/null || true
 
+if [[ "$ROUTER_GOOS/$ROUTER_GOARCH" != "linux/arm64" || ! -f "$ROUTER_XRAY_BIN" ]]; then
+  echo "[error] Linux arm64 Xray is required. Run bash fetch_xray.sh or set ROUTER_XRAY_BIN." >&2
+  exit 1
+fi
+cp "$ROUTER_XRAY_BIN" "$ROUTER_PACKAGE_DIR/bin/xray"
+chmod +x "$ROUTER_PACKAGE_DIR/bin/xray"
+if [[ -f "$(dirname "$ROUTER_XRAY_BIN")/LICENSE" ]]; then
+  cp "$(dirname "$ROUTER_XRAY_BIN")/LICENSE" "$ROUTER_PACKAGE_DIR/bin/xray-LICENSE"
+fi
+
 if [[ -z "$ROUTER_BUILT_AT" ]]; then
   ROUTER_BUILT_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 fi
@@ -138,6 +149,7 @@ package_dir=build/router
 data_dir=$ROUTER_DATA_DIR_NAME
 openvpn_path=$OPENVPN_BUNDLE_PATH
 singbox_path=$SINGBOX_BUNDLE_PATH
+xray_path=bin/xray
 EOF
 if [[ -n "$ROUTER_VERSION" ]]; then
   echo "version=$ROUTER_VERSION" >> "$ROUTER_PACKAGE_DIR/bundle-info.txt"

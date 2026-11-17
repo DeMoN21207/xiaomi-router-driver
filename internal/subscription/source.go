@@ -65,6 +65,9 @@ func ParseEntries(raw string) ([]Entry, error) {
 		if parsedEntries, err := parseSingBoxEntries(payload); err == nil {
 			return parsedEntries, nil
 		}
+		if parsedEntries, err := parseXrayEntries(payload); err == nil {
+			return parsedEntries, nil
+		}
 		return nil, errors.New("no supported locations found in subscription")
 	}
 
@@ -90,7 +93,7 @@ func parseSingBoxEntries(payload string) ([]Entry, error) {
 	seen := make(map[string]struct{}, len(outbounds))
 	for _, outbound := range outbounds {
 		entry, err := parseSingBoxOutbound(outbound)
-		if err != nil {
+		if err != nil || isCompatibilityPlaceholderEntry(entry) {
 			continue
 		}
 		key := strings.TrimSpace(entry.Name)

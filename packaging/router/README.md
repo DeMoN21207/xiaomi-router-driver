@@ -13,7 +13,7 @@ Release archive:
 
 Files:
 - `vpn-manager` is the Linux router binary.
-- `bin/openvpn` and `bin/sing-box` are bundled runtime helper binaries.
+- `bin/openvpn`, `bin/sing-box`, and `bin/xray` are bundled runtime helper binaries.
 - `start.sh` starts the app from this directory.
 - `data/` is the runtime data directory. The app fills it on first start.
 - `bundle-info.txt` contains the bundle build settings.
@@ -24,7 +24,7 @@ Copy:
 
 Start:
 1. `cd /path/to/vpn-manager`
-2. `chmod +x vpn-manager start.sh bin/openvpn bin/sing-box 2>/dev/null || true`
+2. `chmod +x vpn-manager start.sh bin/openvpn bin/sing-box bin/xray 2>/dev/null || true`
 3. `VPN_MANAGER_PORT=18080 ./start.sh`
 
 What the app creates on first start:
@@ -35,5 +35,5 @@ What the app creates on first start:
 
 Requirements:
 - The router architecture must match the built binary in `bundle-info.txt`.
-- `openvpn` and `sing-box` must be available in `PATH`, `./bin/`, or `./.vpn-manager/bin/`.
+- `openvpn`, `sing-box`, and `xray` must be available in `PATH`, `./bin/`, or `./.vpn-manager/bin/`.
 - Root permissions are required only if you want to enable system autostart/service install.

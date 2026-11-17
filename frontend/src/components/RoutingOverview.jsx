@@ -1,97 +1,205 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchJSON } from "../api.js";
-import { routingOverview, serverSwitchRequest } from "../routingOverview.js";
+import { routingOverview, serverSwitchRequest, routeDomainSources, domainSaveRequest } from "../routingOverview.js";
+import { parseDomainInput } from "../domainInput.js";
 import Icon from "./Icon.jsx";
 import ServerPing from "./ServerPing.jsx";
 import { formatPriorityPing } from "../priorityPing.js";
 
-export default function RoutingOverview({ config, statusMap, failoverMap, busy, onChanged, onConfigure, showToast, setPageError, t }) {
+const secondaryButton = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-on-surface-variant hover:bg-surface-container-high disabled:opacity-40";
+const primaryButton = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-on-primary disabled:opacity-40";
+
+export default function RoutingOverview({ config, statusMap, failoverMap, busy, setBusy, onChanged, onConfigure, onEditingChange, showToast, setPageError, t }) {
   const rows = routingOverview(config, statusMap, failoverMap);
   const [editing, setEditing] = useState("");
-  const [location, setLocation] = useState("");
-  const [saving, setSaving] = useState(false);
-  const serverCount = new Set(rows.map(row => row.activeLocation).filter(Boolean)).size;
+  const [pending, setPending] = useState("");
+  const [error, setError] = useState(null);
+  const lock = useRef(false);
 
-  async function changeServer(event, row) {
+  function edit(id) {
+    setEditing(id);
+    setError(null);
+    onEditingChange(Boolean(id));
+  }
+
+  async function apply(id, request, message) {
+    if (lock.current || busy) return false;
+    lock.current = true;
+    setPending(id);
+    setBusy(true);
+    setError(null);
+    setPageError("");
+    try {
+      await fetchJSON(request.path, {
+        method: request.method, timeoutMs: 150_000,
+        ...(request.body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(request.body) } : {}),
+      });
+      await onChanged();
+      edit("");
+      showToast(message);
+      return true;
+    } catch (failure) {
+      setError({ id, message: failure.message });
+      return false;
+    } finally {
+      lock.current = false;
+      setPending("");
+      setBusy(false);
+    }
+  }
+
+  return <section aria-label={t("connections.sectionActive")} className="space-y-4">
+    {rows.length === 0 && <div className="rounded-xl border border-outline-variant/20 p-5 text-sm text-on-surface-variant">{t("connections.noCurrentRoutes")}</div>}
+    {rows.map(row => {
+      const name = row.shared ? t("connections.sharedList") : row.name;
+      const sources = routeDomainSources(config, row);
+      return <article key={row.id} aria-label={name} className="min-w-0 rounded-xl border border-outline-variant/20 bg-surface-container-low p-4 sm:p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <h2 className="break-words font-headline text-lg font-semibold text-on-surface">{name}</h2>
+            <p className="mt-1 text-xs text-on-surface-variant">{row.providerName}</p>
+          </div>
+          <button type="button" disabled={busy || Boolean(editing)} aria-label={t("connections.listSettingsFor", { name })} title={t("connections.listSettings")} onClick={() => onConfigure(row, "automation")} className={`${secondaryButton} -mr-2 shrink-0 text-xs`}><Icon name="settings" className="h-4 w-4" /><span className="hidden sm:inline">{t("connections.listSettings")}</span></button>
+        </div>
+        <div className="mt-4 grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] lg:gap-8">
+          <ServerControl row={row} name={name} editing={editing} edit={edit} busy={busy} pending={pending} error={error} apply={apply} onConfigure={onConfigure} t={t} />
+          <div className="min-w-0 space-y-5 lg:border-l lg:border-outline-variant/20 lg:pl-8">
+            {sources.map(source => <SiteList key={source.id} source={source} config={config} name={name} multiple={sources.length > 1} rowId={row.id} editing={editing} edit={edit} busy={busy} pending={pending} error={error} apply={apply} t={t} />)}
+          </div>
+        </div>
+      </article>;
+    })}
+  </section>;
+}
+
+function ServerControl({ row, name, editing, edit, busy, pending, error, apply, onConfigure, t }) {
+  const id = `${row.id}:server`;
+  const [draft, setDraft] = useState(null);
+  const selectRef = useRef(null);
+  const selected = row.policyId ? row.overrideLocation || "" : row.configuredLocation;
+  const choice = editing === id && draft !== null ? draft : selected;
+  const changed = choice !== selected;
+  const disabled = busy || Boolean(editing && editing !== id);
+  const targets = [...new Set([...row.targets, ...(selected ? [selected] : [])])];
+  const activeTarget = !row.failover && row.targetStatuses.find(item => item.location === row.activeLocation);
+  const configuredOnly = !row.policyId && !row.failover && !row.activeLocation;
+  const mode = row.unavailable ? "connections.noVpnServer" : row.failover ? "connections.failoverRouteActive" : row.policyId ? row.overrideLocation ? "connections.manualServer" : row.scheduledLocation ? "connections.scheduledServer" : "connections.automaticChoice" : "connections.manualServer";
+
+  return <div className="min-w-0">
+    <p className="text-xs text-on-surface-variant">{t(configuredOnly ? "connections.configuredServer" : "connections.workingServer")}</p>
+    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+      <p className="min-w-0 break-words text-base font-semibold text-on-surface">{row.unavailable ? t("connections.noVpnServer") : row.activeLocation || (configuredOnly && row.configuredLocation) || t("connections.waitingServer")}</p>
+      {row.activeLocation && <ServerPing target={activeTarget} t={t} />}
+    </div>
+    <p className="mt-1 text-xs text-on-surface-variant">{t(mode)}</p>
+    {row.canQuickSwitch ? <form className="mt-4" onSubmit={async event => {
+      event.preventDefault();
+      if (!changed) return;
+      if (await apply(id, serverSwitchRequest(row, choice), t(choice ? "connections.locationUpdated" : "connections.priorityOverrideCleared"))) setDraft(null);
+    }}>
+      <label htmlFor={`choice-${row.id}`} className="mb-2 block text-sm text-on-surface">{t("connections.chooseServer")}</label>
+      <select ref={selectRef} id={`choice-${row.id}`} aria-label={t("connections.chooseServerFor", { name })} value={choice} disabled={disabled} onChange={event => {
+        setDraft(event.target.value);
+        edit(event.target.value === selected ? "" : id);
+      }} className="min-h-11 w-full min-w-0 max-w-full rounded-lg border border-outline-variant/40 bg-surface-container px-3 py-2 text-sm text-on-surface">
+        {row.policyId ? <option value="">{t("connections.automaticChoice")}</option> : <option value="" disabled>{t("connections.prioritySelectTarget")}</option>}
+        {targets.map(target => <option key={target} value={target}>{target} · {formatPriorityPing(row.targetStatuses.find(item => item.location === target), t)}</option>)}
+      </select>
+      {row.policyId && (choice || row.overrideLocation) && <p className="mt-2 text-xs text-on-surface-variant">{t("connections.reserveStillWorks")}</p>}
+      {editing === id && <div className="mt-3 flex flex-wrap gap-2">
+        <button type="submit" disabled={disabled || !changed} className={primaryButton}>{pending === id ? t("connections.switchingServer") : t(choice ? "connections.switchNow" : "connections.enableAuto")}</button>
+        <button type="button" disabled={busy} onClick={() => { setDraft(null); edit(""); selectRef.current?.focus(); }} className={secondaryButton}>{t("connections.cancel")}</button>
+      </div>}
+    </form> : <button type="button" disabled={disabled} onClick={() => onConfigure(row, "automation")} className={`${secondaryButton} mt-3 text-primary`}>{t("connections.configureServers")}</button>}
+    {error?.id === id && <p role="alert" className="mt-3 break-words text-sm text-error">{error.message}</p>}
+  </div>;
+}
+
+function SiteList({ source, config, name, multiple, rowId, editing, edit, busy, pending, error, apply, t }) {
+  const id = `${rowId}:sites:${source.id}`;
+  const [draft, setDraft] = useState(null);
+  const [input, setInput] = useState("");
+  const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const [localError, setLocalError] = useState("");
+  const addButton = useRef(null);
+  const wasEditing = useRef(false);
+  const isEditing = editing === id && draft !== null;
+  const entries = isEditing ? draft.entries : source.entries;
+  const filtered = entries.filter(entry => entry.toLowerCase().includes(query.trim().toLowerCase()));
+  const disabled = busy || Boolean(editing && editing !== id);
+  const title = multiple ? source.shared ? t("connections.sharedList") : source.name : t("connections.sites");
+  const changed = isEditing && (JSON.stringify(draft.entries) !== JSON.stringify(draft.source.entries) || Boolean(input.trim()));
+  const preview = [...entries.filter(entry => !/^[\d.:/]+$/.test(entry)), ...entries.filter(entry => /^[\d.:/]+$/.test(entry))].slice(0, 4);
+
+  useEffect(() => {
+    if (wasEditing.current && !isEditing) addButton.current?.focus();
+    wasEditing.current = isEditing;
+  }, [isEditing]);
+
+  function startEdit() {
+    setDraft({ source, entries: [...source.entries] });
+    setInput("");
+    setQuery("");
+    setLocalError("");
+    edit(id);
+  }
+
+  function addToDraft() {
+    const added = parseDomainInput(input);
+    if (!added.length) { setLocalError(t("connections.siteInputInvalid")); return; }
+    setDraft(previous => ({ ...previous, entries: [...new Set([...previous.entries, ...added])] }));
+    setInput("");
+    setQuery("");
+    setLocalError("");
+  }
+
+  async function save(event) {
     event.preventDefault();
-    setSaving(true);
-    try {
-      const request = serverSwitchRequest(row, location);
-      await fetchJSON(request.path, { method: request.method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(request.body), timeoutMs: 150_000 });
-      await onChanged();
-      setEditing("");
-      showToast(t("connections.locationUpdated"));
-    } catch (error) {
-      setPageError(error.message);
-      showToast(error.message, true);
-    } finally { setSaving(false); }
+    const added = parseDomainInput(input);
+    if (input.trim() && !added.length) { setLocalError(t("connections.siteInputInvalid")); return; }
+    const nextEntries = [...new Set([...draft.entries, ...added])];
+    let request;
+    try { request = domainSaveRequest(config, draft.source, nextEntries); }
+    catch { setLocalError(t("connections.siteListChanged")); return; }
+    if (await apply(id, request, t("connections.domainsUpdated"))) { setDraft(null); setInput(""); setQuery(""); }
   }
 
-  async function returnToAuto(row) {
-    setSaving(true);
-    try {
-      await fetchJSON(`/api/priority-policies/${encodeURIComponent(row.policyId)}/override`, { method: "DELETE", timeoutMs: 150_000 });
-      await onChanged();
-      showToast(t("connections.priorityOverrideCleared"));
-    } catch (error) {
-      setPageError(error.message);
-      showToast(error.message, true);
-    } finally { setSaving(false); }
-  }
-
-  return (
-    <section aria-labelledby="current-routing-title" className="overflow-hidden rounded-2xl border border-outline-variant/20 bg-surface-container-low">
-      <div className="border-b border-outline-variant/20 p-5 sm:p-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 id="current-routing-title" className="font-headline text-xl font-semibold text-on-surface">{t("connections.currentScheme")}</h2>
-          <span className="text-xs text-on-surface-variant">{t("connections.schemeSummary", { lists: rows.length, servers: serverCount })}</span>
-        </div>
-        <p className="mt-2 max-w-2xl text-sm text-on-surface-variant">{t("connections.currentSchemeHelp")}</p>
+  return <div className="min-w-0">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h3 className="text-sm font-medium text-on-surface">{title} <span className="ml-1 text-on-surface-variant">{entries.length}</span></h3>
+      {!isEditing && <button ref={addButton} type="button" disabled={disabled} onClick={startEdit} className={`${secondaryButton} -mr-2 text-primary`}><Icon name="add" className="h-4 w-4" />{t("connections.addSite")}</button>}
+    </div>
+    {!isEditing ? <>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {(expanded ? [] : preview).map(entry => <span key={entry} className="max-w-full break-all rounded bg-surface-container px-2 py-1 font-mono text-xs text-on-surface-variant">{entry}</span>)}
+        {!entries.length && <p className="text-sm text-on-surface-variant">{t("connections.noSitesYet")}</p>}
       </div>
-      {rows.length === 0 ? <p className="p-6 text-sm text-on-surface-variant">{t("connections.noCurrentRoutes")}</p> : (
-        <div className="divide-y divide-outline-variant/20">
-          {rows.map(row => {
-            const name = row.shared ? t("connections.sharedList") : row.name;
-            return <article key={row.id} aria-label={name} className="p-5 sm:p-6">
-              <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto] lg:items-center">
-                <div className="min-w-0">
-                  <h3 className="font-headline text-base font-semibold text-on-surface">{name}</h3>
-                  <p className="mt-1 text-xs text-on-surface-variant">{t("connections.listEntryCount", { count: row.count })} · {row.providerName}</p>
-                </div>
-                <div className="min-w-0">
-                  <div className="mb-1 flex items-center gap-2 text-xs text-on-surface-variant">
-                    <span className={`h-1.5 w-1.5 rounded-full ${row.activeLocation ? "bg-secondary" : "bg-outline"}`} />
-                    {t(row.unavailable ? "connections.noVpnServer" : row.failover ? "connections.failoverRouteActive" : row.policyId ? row.overrideLocation ? "connections.manualServer" : row.scheduledLocation ? "connections.scheduledServer" : row.selectionMode === "latency" ? "connections.autoServerByPing" : "connections.autoServer" : "connections.fixedServer")}
-                  </div>
-                  <p className="break-words text-sm font-medium text-on-surface">{row.unavailable ? t("connections.noVpnServer") : row.activeLocation || row.configuredLocation || t("connections.waitingServer")}</p>
-                  <p className="mt-1 text-xs text-on-surface-variant">{t("connections.serverPing")}: <ServerPing target={!row.failover && row.targetStatuses.find(target => target.location === (row.activeLocation || row.configuredLocation))} t={t} /></p>
-                  {row.policyId && !row.activeLocation && <p className="mt-1 text-xs text-on-surface-variant">{t("connections.waitingServer")}</p>}
-                </div>
-                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-                  <button type="button" disabled={busy || saving || row.targets.length < 1} onClick={() => { if (!row.canQuickSwitch) { onConfigure(row, "automation"); return; } setEditing(row.id); setLocation(row.activeLocation || row.configuredLocation || row.targets[0] || ""); }} className="inline-flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-sm font-medium text-primary hover:bg-primary/20 disabled:opacity-40"><Icon name="swap_horiz" className="h-4 w-4" />{t(row.canQuickSwitch ? "connections.switchServer" : "connections.configureServers")}</button>
-                  <button type="button" onClick={() => onConfigure(row, "domains")} className="rounded-lg px-3 py-2 text-sm text-on-surface-variant hover:bg-surface-container-high">{t("connections.configureRoute")}</button>
-                </div>
-              </div>
-              <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-                {row.policyId && <button type="button" onClick={() => onConfigure(row, "automation")} className="text-primary hover:underline">{t("connections.fallbackOrder")}</button>}
-                {row.overrideLocation && <button type="button" disabled={busy || saving} onClick={() => returnToAuto(row)} className="text-primary hover:underline disabled:opacity-40">{t("connections.returnToAuto")}</button>}
-              </div>
-              {editing === row.id && <form onSubmit={event => changeServer(event, row)} className="mt-4 rounded-lg bg-surface-container p-4">
-                <label className="block text-sm font-medium text-on-surface" htmlFor={`server-choice-${row.id}`}>{t("connections.chooseServerFor", { name })}</label>
-                <select id={`server-choice-${row.id}`} value={location} onChange={event => setLocation(event.target.value)} disabled={saving} className="mt-2 w-full min-w-0 rounded-lg border border-outline-variant/30 bg-surface-container-low px-3 py-2 text-sm text-on-surface">
-                  <option value="" disabled>{t("connections.prioritySelectTarget")}</option>
-                  {row.targets.map(target => <option key={target} value={target}>{target} · {formatPriorityPing(row.targetStatuses.find(item => item.location === target), t)}</option>)}
-                </select>
-                <p className="mt-2 text-xs text-on-surface-variant">{t(row.policyId ? "connections.manualServerHelp" : "connections.fixedServerHelp")}</p>
-                <div className="mt-4 flex gap-2">
-                  <button type="submit" disabled={saving || !location} className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-on-primary disabled:opacity-40">{saving ? t("connections.changingLocation") : t("connections.applyLocation")}</button>
-                  <button type="button" onClick={() => setEditing("")} disabled={saving} className="rounded-lg px-3 py-2 text-sm text-on-surface-variant hover:bg-surface-container-high">{t("connections.cancel")}</button>
-                </div>
-              </form>}
-            </article>;
-          })}
-        </div>
-      )}
-    </section>
-  );
+      {entries.length > 0 && <button type="button" disabled={entries.length <= 4 && disabled} aria-expanded={entries.length > 4 ? expanded : undefined} onClick={() => { if (entries.length <= 4) { startEdit(); return; } setExpanded(value => !value); setQuery(""); }} className={`${secondaryButton} -ml-3 mt-1 text-primary`}>{t(entries.length <= 4 ? "connections.editSites" : expanded ? "connections.hideSites" : "connections.viewSites", { count: entries.length })}</button>}
+    </> : null}
+    {(expanded || isEditing) && <div className="mt-2">
+      {(entries.length > 6 || query) && <input type="search" aria-label={t("connections.searchSitesFor", { name })} placeholder={t("connections.sharedDomainsSearch")} value={query} onChange={event => setQuery(event.target.value)} className="mb-2 min-h-11 w-full min-w-0 rounded-lg border border-outline-variant/30 bg-surface-container px-3 py-2 text-sm text-on-surface" />}
+      <ul aria-label={t("connections.sitesFor", { name })} className="max-h-48 overflow-y-auto overscroll-contain">
+        {filtered.map(entry => <li key={entry} className="flex min-h-10 items-center justify-between gap-2 border-b border-outline-variant/15 py-1">
+          <span className="min-w-0 break-all font-mono text-xs text-on-surface">{entry}</span>
+          {isEditing && <button type="button" disabled={busy} aria-label={t("connections.removeDomain", { domain: entry })} onClick={() => setDraft(previous => ({ ...previous, entries: previous.entries.filter(item => item !== entry) }))} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-on-surface-variant hover:bg-error/10 hover:text-error disabled:opacity-40"><Icon name="close" className="h-4 w-4" /></button>}
+        </li>)}
+      </ul>
+      {!filtered.length && <p className="py-2 text-sm text-on-surface-variant">{t(query ? "connections.sharedDomainsNoMatches" : "connections.noSitesYet")}</p>}
+      {!isEditing && <button type="button" disabled={disabled} onClick={startEdit} className={`${secondaryButton} -ml-3 text-primary`}>{t("connections.editSites")}</button>}
+    </div>}
+    {isEditing && <form onSubmit={save} className="mt-3 space-y-3">
+      <label className="block text-sm text-on-surface" htmlFor={`site-input-${id}`}>{t("connections.addSite")}</label>
+      <div className="flex min-w-0 gap-2">
+        <input id={`site-input-${id}`} autoFocus value={input} disabled={busy} onChange={event => { setInput(event.target.value); setLocalError(""); }} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); if (input.trim()) addToDraft(); } }} placeholder="example.com" className="min-h-11 w-full min-w-0 rounded-lg border border-outline-variant/30 bg-surface-container px-3 py-2 text-sm text-on-surface" />
+        <button type="button" disabled={busy || !input.trim()} onClick={addToDraft} className={`${secondaryButton} border border-outline-variant/30`}>{t("connections.addToList")}</button>
+      </div>
+      <p className="text-xs text-on-surface-variant">{t("connections.siteDraftHelp")}</p>
+      <div className="flex flex-wrap gap-2">
+        <button type="submit" disabled={busy || !changed} className={primaryButton}>{pending === id ? t("connections.savingSites") : t("connections.prioritySave")}</button>
+        <button type="button" disabled={busy} onClick={() => { setDraft(null); setInput(""); setQuery(""); setLocalError(""); edit(""); }} className={secondaryButton}>{t("connections.cancel")}</button>
+      </div>
+    </form>}
+    {(localError || error?.id === id) && <p role="alert" className="mt-3 break-words text-sm text-error">{localError || error.message}</p>}
+  </div>;
 }

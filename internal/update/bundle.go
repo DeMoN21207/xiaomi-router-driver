@@ -19,6 +19,7 @@ type BundleInfo struct {
 	DataDir     string `json:"dataDir,omitempty"`
 	OpenVPNPath string `json:"openvpnPath,omitempty"`
 	SingBoxPath string `json:"singboxPath,omitempty"`
+	XrayPath    string `json:"xrayPath,omitempty"`
 	Version     string `json:"version,omitempty"`
 	Commit      string `json:"commit,omitempty"`
 	BuiltAt     string `json:"builtAt,omitempty"`
@@ -51,6 +52,12 @@ func ValidateBundle(root string) (BundleInfo, error) {
 		"bundle-info.txt",
 		defaultPath(info.OpenVPNPath, "bin/openvpn"),
 		defaultPath(info.SingBoxPath, "bin/sing-box"),
+	}
+	if info.XrayPath != "" {
+		if info.XrayPath != "bin/xray" {
+			return BundleInfo{}, fmt.Errorf("%w: xray_path must be bin/xray", ErrInvalidBundle)
+		}
+		required = append(required, info.XrayPath)
 	}
 	for _, name := range required {
 		if err := requireNonEmptyRegularFile(bundleRoot, name); err != nil {
@@ -134,6 +141,8 @@ func ParseBundleInfo(path string) (BundleInfo, error) {
 			info.OpenVPNPath = value
 		case "singbox_path":
 			info.SingBoxPath = value
+		case "xray_path":
+			info.XrayPath = value
 		case "version":
 			info.Version = value
 		case "commit":

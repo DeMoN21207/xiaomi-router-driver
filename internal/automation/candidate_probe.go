@@ -3,14 +3,11 @@ package automation
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"xiomi-router-driver/internal/config"
-	"xiomi-router-driver/internal/runtimebin"
 	"xiomi-router-driver/internal/subscription"
 )
 
@@ -45,10 +42,10 @@ func ProbeSubscriptionCandidates(ctx context.Context, provider config.Provider, 
 			selected = append(selected, entry)
 		}
 	}
-	return probeCandidateEntries(ctx, runtimebin.Resolve(os.Getenv("VPN_MANAGER_SINGBOX_BIN"), "sing-box", filepath.Dir(dataDir), dataDir), selected, probeStandbyEntry), nil
+	return probeCandidateEntries(ctx, dataDir, selected, probeStandbyEntry), nil
 }
 
-func probeCandidateEntries(ctx context.Context, binary string, entries []subscription.Entry, check func(context.Context, string, subscription.Entry) providerProbeResult) []CandidateProbe {
+func probeCandidateEntries(ctx context.Context, dataDir string, entries []subscription.Entry, check func(context.Context, string, subscription.Entry) providerProbeResult) []CandidateProbe {
 	results := make([]CandidateProbe, len(entries))
 	slots := make(chan struct{}, 3)
 	var workers sync.WaitGroup
@@ -69,7 +66,7 @@ func probeCandidateEntries(ctx context.Context, binary string, entries []subscri
 			defer func() { <-slots }()
 			probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
-			result := check(probeCtx, binary, entry)
+			result := check(probeCtx, subscriptionProbeBinary(dataDir, entry), entry)
 			results[index] = CandidateProbe{Location: entry.Name, Healthy: result.Healthy, LatencyMs: result.LatencyMs, Detail: result.Detail}
 		}(index, entry)
 	}

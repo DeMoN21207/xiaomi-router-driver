@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os/exec"
 	"regexp"
@@ -109,10 +110,14 @@ func MeasureLatencies(ctx context.Context, locations []Location) []Location {
 func pingHost(parent context.Context, pingBinary string, host string) (int64, string) {
 	ctx, cancel := context.WithTimeout(parent, latencyTimeout)
 	defer cancel()
+	target, err := resolvePingTarget(ctx, host, net.DefaultResolver.LookupIPAddr)
+	if err != nil {
+		return 0, err.Error()
+	}
 
-	args := []string{"-c", "1", "-W", "2", host}
+	args := []string{"-c", "1", "-W", "2", target}
 	if runtime.GOOS == "windows" {
-		args = []string{"-n", "1", "-w", "1500", host}
+		args = []string{"-n", "1", "-w", "1500", target}
 	}
 
 	cmd := exec.CommandContext(ctx, pingBinary, args...)
@@ -134,6 +139,32 @@ func pingHost(parent context.Context, pingBinary string, host string) (int64, st
 	}
 
 	return latency, ""
+}
+
+// Resolve once, reject DNS sinkholes, and ping that exact address. Passing the
+// hostname to ping again could resolve it differently and measure localhost.
+func resolvePingTarget(ctx context.Context, host string, lookup func(context.Context, string) ([]net.IPAddr, error)) (string, error) {
+	addresses, err := lookup(ctx, host)
+	if err != nil {
+		return "", errors.New("DNS lookup failed")
+	}
+	var ipv6Target string
+	for _, address := range addresses {
+		ip := address.IP
+		if ip.IsGlobalUnicast() && !ip.IsLoopback() {
+			// Prefer IPv4, matching the router's ping binary and IPv4 policy routes.
+			if ip.To4() != nil {
+				return address.String(), nil
+			}
+			if ipv6Target == "" {
+				ipv6Target = address.String()
+			}
+		}
+	}
+	if ipv6Target != "" {
+		return ipv6Target, nil
+	}
+	return "", errors.New("DNS returned a local or non-routable address")
 }
 
 func parsePingLatency(output string) int64 {

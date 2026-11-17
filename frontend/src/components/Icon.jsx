@@ -1,4 +1,5 @@
 const iconMap = {
+  menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   dashboard: (
     <>
       <path d="M4 4h7v7H4z" />

@@ -17,6 +17,7 @@ if not defined ROUTER_PACKAGE_DIR set "ROUTER_PACKAGE_DIR=%ROOT_DIR%\build\route
 if not defined ROUTER_DATA_DIR_NAME set "ROUTER_DATA_DIR_NAME=data"
 if not defined ROUTER_OPENVPN_BIN set "ROUTER_OPENVPN_BIN="
 if not defined ROUTER_SINGBOX_BIN set "ROUTER_SINGBOX_BIN="
+if not defined ROUTER_XRAY_BIN set "ROUTER_XRAY_BIN=%ROOT_DIR%\.tools\xray\v26.11.9\linux\xray"
 if not defined ROUTER_VERSION set "ROUTER_VERSION="
 if not defined ROUTER_COMMIT set "ROUTER_COMMIT="
 if not defined ROUTER_ARCHIVE_NAME set "ROUTER_ARCHIVE_NAME=vpn-manager-%ROUTER_GOOS%-%ROUTER_GOARCH%.tar.gz"
@@ -154,6 +155,14 @@ if defined ROUTER_SINGBOX_BIN (
     set "SINGBOX_BUNDLE_PATH=bin/sing-box"
 )
 
+if not exist "%ROUTER_XRAY_BIN%" (
+    echo [error] Set ROUTER_XRAY_BIN to the official Linux arm64 Xray v26.11.9 binary.
+    exit /b 1
+)
+copy /Y "%ROUTER_XRAY_BIN%" "%ROUTER_PACKAGE_DIR%\bin\xray" >nul
+if errorlevel 1 exit /b 1
+for %%F in ("%ROUTER_XRAY_BIN%") do if exist "%%~dpFLICENSE" copy /Y "%%~dpFLICENSE" "%ROUTER_PACKAGE_DIR%\bin\xray-LICENSE" >nul
+
 (
     echo binary=%ROUTER_BINARY_NAME%
     echo goos=%ROUTER_GOOS%
@@ -163,6 +172,7 @@ if defined ROUTER_SINGBOX_BIN (
     echo data_dir=%ROUTER_DATA_DIR_NAME%
     echo openvpn_path=%OPENVPN_BUNDLE_PATH%
     echo singbox_path=%SINGBOX_BUNDLE_PATH%
+    echo xray_path=bin/xray
 ) > "%ROUTER_PACKAGE_DIR%\bundle-info.txt"
 if defined ROUTER_VERSION echo version=%ROUTER_VERSION%>> "%ROUTER_PACKAGE_DIR%\bundle-info.txt"
 if defined ROUTER_COMMIT echo commit=%ROUTER_COMMIT%>> "%ROUTER_PACKAGE_DIR%\bundle-info.txt"

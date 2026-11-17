@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { routingOverview, serverSwitchRequest } from "./routingOverview.js";
+import { routingOverview, serverSwitchRequest, routeDomainSources, domainSaveRequest } from "./routingOverview.js";
 
 const config = {
   providers: [{ id: "vpn", name: "Subscription", enabled: true }],
@@ -92,4 +92,54 @@ test("overview consumes backend effective ownership and retains saved fields", (
   assert.deepEqual(rows.map(row => row.ruleId), ["main", "ai"]);
   assert.deepEqual(rows[0].targets, ["Latvia", "Sweden"], "inactive reserves remain available for switching");
   assert.equal(rows[0].rule, legacy.rules[0], "runtime domains must never replace saved rule fields");
+});
+
+test("automatic selection deletes only the override", () => {
+  const row = routingOverview(config)[0];
+  assert.deepEqual(serverSwitchRequest(row, ""), { path: "/api/priority-policies/common-policy/override", method: "DELETE" });
+});
+
+test("inline site editing preserves shared and rule-owned domains", () => {
+  const mixed = { ...config, rules: config.rules.map(r => r.id === "main" ? { ...r, domains: ["private.example"] } : r) };
+  const sources = routeDomainSources(mixed, routingOverview(mixed)[0]);
+  assert.deepEqual(sources.map(s => [s.id, s.entries]), [["shared", ["youtube.com", "chatgpt.com"]], ["main", ["private.example"]]]);
+  assert.deepEqual(domainSaveRequest(mixed, sources[0], ["youtube.com"]), { path: "/api/config/shared-domains", method: "PUT", body: { entries: ["youtube.com"] } });
+  const request = domainSaveRequest(mixed, sources[1], ["new.example"]);
+  assert.equal(request.path, "/api/rules/main?apply=1");
+  assert.deepEqual(request.body, { name: "Main", providerId: "vpn", selectedLocation: "Latvia", enabled: true, domains: "new.example" });
+});
+
+test("provider-wide lists keep separate editable sources", () => {
+  const whole = { ...config, priorityPolicies: [{ id: "all", providerId: "vpn", enabled: true, targets: [] }] };
+  assert.deepEqual(routeDomainSources(whole, routingOverview(whole)[0]).map(s => s.id), ["shared", "ai"]);
+});
+
+test("empty main and named policy lists stay editable but empty reserves stay hidden", () => {
+  const empty = { ...config, sharedDomains: { ...config.sharedDomains, entries: [] }, rules: config.rules.map(r => ({ ...r, domains: [] })) };
+  assert.deepEqual(routingOverview(empty).map(r => r.ruleId), ["main", "ai"]);
+  assert.equal(routeDomainSources(empty, routingOverview(empty)[0])[0].id, "shared");
+  assert.deepEqual(routeDomainSources(empty, routingOverview(empty)[1])[0].entries, []);
+});
+
+test("backend-disabled empty effective rules remain editable for shared and named lists", () => {
+  const saved = config.rules.map(r => ({ ...r, domains: [] }));
+  const empty = { ...config, rules: saved, effectiveRules: saved.map(r => ({ ...r, enabled: false })), sharedDomains: { ...config.sharedDomains, entries: [] } };
+  assert.deepEqual(routingOverview(empty).map(r => r.ruleId), ["main", "ai"]);
+  assert.deepEqual(routingOverview({ ...empty, priorityPolicies: [] }).map(r => r.ruleId), ["main"]);
+});
+
+test("empty API lists serialized as null can receive their first site", () => {
+  const empty = { ...config, sharedDomains: { ...config.sharedDomains, entries: null }, rules: config.rules.map(r => ({ ...r, domains: null })) };
+  const rows = routingOverview(empty);
+  assert.deepEqual(domainSaveRequest(empty, routeDomainSources(empty, rows[0])[0], ["first.example"]).body.entries, ["first.example"]);
+  assert.equal(domainSaveRequest(empty, routeDomainSources(empty, rows[1])[0], ["first.example"]).body.domains, "first.example");
+});
+
+test("stale site drafts cannot overwrite another edit; current server fields are preserved", () => {
+  const source = routeDomainSources(config, routingOverview(config)[1])[0];
+  const newer = { ...config, rules: config.rules.map(r => r.id === "ai" ? { ...r, selectedLocation: "Sweden" } : r) };
+  assert.equal(domainSaveRequest(newer, source, ["example.com"]).body.selectedLocation, "Sweden");
+  const changed = { ...config, rules: config.rules.map(r => r.id === "ai" ? { ...r, domains: ["changed.example"] } : r) };
+  assert.throws(() => domainSaveRequest(changed, source, []), /changed/);
+  assert.throws(() => domainSaveRequest({ ...config, rules: [] }, source, []), /changed/);
 });
