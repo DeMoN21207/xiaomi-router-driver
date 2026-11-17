@@ -32,10 +32,14 @@ func TestLatencyPolicySelectsFastestHealthyFreshTarget(t *testing.T) {
 	if !ok || decision.ActiveLocation != "Netherlands" {
 		t.Fatalf("did not choose the faster server: %+v", decision)
 	}
+}
+
+func TestLatencyPolicyRejectsUnhealthyFastestTarget(t *testing.T) {
+	s, state, now := latencyPolicyFixture(t)
 	s.probeStandby = func(_ context.Context, _ config.Provider, location string) providerProbeResult {
 		return providerProbeResult{Healthy: location == "Germany"}
 	}
-	decision, _ = s.evaluatePriorityPolicyLocked(t.Context(), state, status.Snapshot{}, state.PriorityPolicies[0], now)
+	decision, _ := s.evaluatePriorityPolicyLocked(t.Context(), state, status.Snapshot{}, state.PriorityPolicies[0], now)
 	if decision.ActiveLocation != "Germany" {
 		t.Fatalf("low ping bypassed VPN health: %+v", decision)
 	}

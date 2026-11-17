@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { routingOverview, serverSwitchRequest, prioritySelectionMessage, routeDomainSources, domainSaveRequest } from "./routingOverview.js";
+import { routingOverview, serverSwitchRequest, prioritySelectionMessage, routeDomainSources, domainSaveRequest, formatOutageDuration } from "./routingOverview.js";
 
 const config = {
   providers: [{ id: "vpn", name: "Subscription", enabled: true }],
@@ -25,6 +25,23 @@ test("current scheme keeps shared and custom decisions separate", () => {
   assert.equal(rows[1].name, "DeepSeek API");
   assert.equal(rows[1].overrideLocation, "Germany");
   assert.equal(rows.length, 2, "empty reserve servers must not appear as separate routes");
+});
+
+test("each route shows its own ongoing and completed outage measurements", () => {
+  const currentOutage = { firstFailedAt: "2026-11-17T00:11:00Z", durationMs: 2650 };
+  const lastOutage = { firstFailedAt: "2026-11-17T00:05:02Z", recoveredAt: "2026-11-17T00:05:02.120Z", durationMs: 120 };
+  const rows = routingOverview(config, new Map([["ai-policy", { currentOutage, lastOutage }]]));
+  assert.equal(rows[1].currentOutage, currentOutage);
+  assert.equal(rows[1].lastOutage, lastOutage);
+  assert.equal(rows[0].currentOutage, null);
+  assert.equal(rows[0].lastOutage, null);
+});
+
+test("outage duration preserves subsecond precision and distinguishes zero from missing data", () => {
+  assert.equal(formatOutageDuration(120, "en"), "120 ms");
+  assert.equal(formatOutageDuration(2650, "ru"), "2,65 с");
+  assert.equal(formatOutageDuration(0, "en"), "0 ms");
+  for (const missing of [undefined, null, -1]) assert.equal(formatOutageDuration(missing, "en"), "");
 });
 
 test("shared default uses the actual synthetic policy and can be switched", () => {

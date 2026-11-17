@@ -2,7 +2,6 @@ package automation
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -21,16 +20,13 @@ func TestRapidPriorityChecksKeepTwoHealthyReservesWarmWithinProbeBudget(t *testi
 	s.priority.pings[standbyProbeKey(state.Providers[0], "Netherlands")] = priorityServerPing{Ms: 20, Checked: now}
 	s.priority.pings[standbyProbeKey(state.Providers[0], "Sweden")] = priorityServerPing{Ms: 30, Checked: now}
 	s.priority.decisions[policy.ID] = priorityDecision{ActiveLocation: "Germany", Mode: "provider", Since: now.Add(-time.Hour)}
-	var mu sync.Mutex
-	checked := map[string]bool{}
+	checked := make(chan string, 2)
 	s.probeStandby = func(ctx context.Context, _ config.Provider, location string) providerProbeResult {
 		deadline, ok := ctx.Deadline()
 		if !ok || time.Until(deadline) > 1600*time.Millisecond {
 			t.Error("reserve probe is not bounded for rapid failover")
 		}
-		mu.Lock()
-		checked[location] = true
-		mu.Unlock()
+		checked <- location
 		return providerProbeResult{Healthy: true}
 	}
 	snapshot := status.Snapshot{SubscriptionRuntime: []subscription.RuntimeSnapshot{{Key: "provider_1::germany", Status: "running", InterfaceName: "sb-active"}}}
@@ -38,8 +34,12 @@ func TestRapidPriorityChecksKeepTwoHealthyReservesWarmWithinProbeBudget(t *testi
 	if decision.ActiveLocation != "Germany" {
 		t.Fatal("warming reserves switched a healthy active server")
 	}
-	if !checked["Netherlands"] || !checked["Sweden"] {
-		t.Fatalf("reserves were not checked ahead of failure: %v", checked)
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		seen[priorityAwait(t, checked)] = true
+	}
+	if !seen["Netherlands"] || !seen["Sweden"] {
+		t.Fatalf("reserves were not checked ahead of failure: %v", seen)
 	}
 }
 

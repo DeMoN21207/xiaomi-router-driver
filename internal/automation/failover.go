@@ -29,6 +29,9 @@ type providerProbeResult struct {
 	Detail    string
 	Location  string
 	LatencyMs int64
+	// Only physical HTTPS checks bound to an active tunnel carry sample times.
+	tunnelStarted, tunnelFinished time.Time
+	runtimeUnavailable            bool
 }
 
 type failoverOverride struct {
@@ -151,6 +154,7 @@ func (s *Supervisor) applyStateRespectingFailover(ctx context.Context, state con
 		return err
 	}
 	s.noteDegradedTargets(appliedState, report)
+	s.observeBlockedRoutes(sharedDomainRoutingState(state), report, time.Now())
 	s.priorityMu.Lock()
 	reconcilePriorityOutcomes(s.priority.decisions, report)
 	s.priorityMu.Unlock()

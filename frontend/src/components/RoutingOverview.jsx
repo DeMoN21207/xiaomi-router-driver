@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchJSON } from "../api.js";
-import { routingOverview, serverSwitchRequest, prioritySelectionMessage, prioritySelectionError, routeDomainSources, domainSaveRequest } from "../routingOverview.js";
+import { routingOverview, serverSwitchRequest, prioritySelectionMessage, prioritySelectionError, routeDomainSources, domainSaveRequest, formatOutageDuration } from "../routingOverview.js";
 import { parseDomainInput } from "../domainInput.js";
+import { useI18n } from "../i18n.jsx";
 import Icon from "./Icon.jsx";
 import ServerPing from "./ServerPing.jsx";
 import { formatPriorityPing } from "../priorityPing.js";
@@ -96,6 +97,11 @@ function ServerControl({ row, name, editing, edit, busy, pending, error, apply, 
     {row.blocked || row.locationIssue
       ? <p className="mt-1 break-words text-sm text-error">{t(row.blocked ? "connections.routeBlocked" : row.activeLocation ? "connections.routeRetained" : "connections.routeUnconfirmed")}</p>
       : <p className="mt-1 text-xs text-on-surface-variant">{t(mode)}</p>}
+    {row.policyId && <div className="mt-3 space-y-1 text-xs text-on-surface-variant">
+      {row.currentOutage && <OutageMeasurement outage={row.currentOutage} ongoing />}
+      {row.lastOutage && <OutageMeasurement outage={row.lastOutage} />}
+      {!row.currentOutage && !row.lastOutage && <p>{t("connections.outageNoData")}</p>}
+    </div>}
     {row.canQuickSwitch ? <form className="mt-4" onSubmit={async event => {
       event.preventDefault();
       if (!changed) return;
@@ -117,6 +123,44 @@ function ServerControl({ row, name, editing, edit, busy, pending, error, apply, 
     </form> : <button type="button" disabled={disabled} onClick={() => onConfigure(row, "automation")} className={`${secondaryButton} mt-3 text-primary`}>{t("connections.configureServers")}</button>}
     {error?.id === id && <p role="alert" className="mt-3 break-words text-sm text-error">{error.message}</p>}
   </div>;
+}
+
+function OutageMeasurement({ outage, ongoing = false }) {
+  const { lang, t } = useI18n();
+  const duration = formatOutageDuration(outage.durationMs, lang) || t("common.noData");
+  const kind = ["automatic", "manual", "transient"].includes(outage.kind) ? t(`connections.outageKind.${outage.kind}`) : "";
+  const firstFailure = outage.startEvidence === "runtime-unavailable" ? "outageTunnelUnavailable"
+    : outage.startEvidence === "route-blocked" ? "outageRouteBlocked"
+    : outage.startEvidence === "https-failed" ? "outageFirstFailed" : "outageFirstObserved";
+  const stages = [
+    ["firstFailedAt", firstFailure, outage.fromLocation],
+    ["detectedAt", "outageDetected"],
+    ["selectedAt", "outageSelected", outage.toLocation],
+    ["appliedAt", "outageApplied"],
+    ["recoveredAt", "outageRecovered"],
+  ];
+  return <details>
+    <summary className={`cursor-pointer break-words py-1 ${ongoing ? "text-error" : ""}`}>
+      {t(ongoing ? "connections.outageOngoing" : "connections.outageCompleted", { duration })}
+    </summary>
+    <div className="mt-1 space-y-2 border-l border-outline-variant/40 pl-3">
+      <p>{t("connections.outageBounds")}</p>
+      {kind && <p className="text-on-surface">{kind}</p>}
+      <dl className="space-y-1">
+        {stages.map(([field, label, location]) => {
+          const value = outage[field];
+          const time = Date.parse(value);
+          if (!Number.isFinite(time)) return null;
+          return <div key={field} className="flex flex-wrap justify-between gap-x-3">
+            <dt className="min-w-0 break-words">{t(`connections.${label}`)}{location && ` · ${location}`}</dt>
+            <dd className="tabular-nums"><time dateTime={value}>{new Date(time).toLocaleString(lang, {
+              month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3,
+            })}</time></dd>
+          </div>;
+        })}
+      </dl>
+    </div>
+  </details>;
 }
 
 function SiteList({ source, config, name, multiple, rowId, editing, edit, busy, pending, error, apply, t }) {

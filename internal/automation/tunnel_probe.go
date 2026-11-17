@@ -11,13 +11,36 @@ import (
 )
 
 func (s *Supervisor) subscriptionTunnelProbe(ctx context.Context, iface, mark string) providerProbeResult {
-	if s.probeTunnel != nil {
-		return s.probeTunnel(ctx, iface, mark)
-	}
 	key := "tunnel:" + iface + ":" + mark
-	if result, ok := s.cachedProviderProbe(key, time.Second); ok {
-		return result
+	if s.probeTunnel == nil {
+		if result, ok := s.cachedProviderProbe(key, time.Second); ok {
+			return result
+		}
 	}
+	result := s.freshTunnelProbe(ctx, iface, mark)
+	if s.probeTunnel == nil && ctx.Err() == nil && !result.tunnelFinished.IsZero() {
+		s.cacheProviderProbe(key, result)
+	}
+	return result
+}
+
+func (s *Supervisor) freshTunnelProbe(ctx context.Context, iface, mark string) providerProbeResult {
+	started := time.Now().UTC()
+	var result providerProbeResult
+	if s.probeTunnel != nil {
+		result = s.probeTunnel(ctx, iface, mark)
+	} else {
+		result = runTunnelHTTPSProbe(ctx, iface, mark)
+	}
+	// A per-probe deadline is an observed failure. Cancellation of the
+	// evaluation is not a sample; the observer also checks its parent context.
+	if ctx.Err() != context.Canceled && strings.TrimSpace(iface) != "" {
+		result.tunnelStarted, result.tunnelFinished = started, time.Now().UTC()
+	}
+	return result
+}
+
+func runTunnelHTTPSProbe(ctx context.Context, iface, mark string) providerProbeResult {
 	ctx, cancel := context.WithTimeout(ctx, providerProbeTimeout)
 	defer cancel()
 	dialer := &net.Dialer{Control: func(_, _ string, conn syscall.RawConn) error {
@@ -34,7 +57,6 @@ func (s *Supervisor) subscriptionTunnelProbe(ctx context.Context, iface, mark st
 	// fallback is allowed when binding the tunnel socket fails.
 	result := probeTunnelURLs(ctx, client, []string{"https://1.1.1.1/", "https://8.8.8.8/"})
 	result.Detail = fmt.Sprintf("%s via %s", result.Detail, iface)
-	s.cacheProviderProbe(key, result)
 	return result
 }
 

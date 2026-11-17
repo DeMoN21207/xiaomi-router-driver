@@ -3,13 +3,15 @@ package automation
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 type priorityProbeCycleKey struct{}
 
 type priorityProbeCycle struct {
-	mu     sync.Mutex
-	active map[string]*priorityCycleProbe
+	snapshotAt time.Time
+	mu         sync.Mutex
+	active     map[string]*priorityCycleProbe
 }
 
 type priorityCycleProbe struct {

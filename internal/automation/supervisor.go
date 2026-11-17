@@ -42,6 +42,7 @@ type Supervisor struct {
 	priority     priorityRuntime
 	probeTunnel  func(context.Context, string, string) providerProbeResult
 	probeStandby func(context.Context, config.Provider, string) providerProbeResult
+	standbyPool  standbyProbePool
 	probeCacheMu sync.Mutex
 	probeCache   map[string]cachedProviderProbe
 
@@ -77,7 +78,8 @@ func NewSupervisor(
 		failover:    newFailoverRuntime(),
 		priority:    newPriorityRuntime(),
 	}
-	s.probeStandby = s.probeSubscriptionStandby
+	s.probeStandby = s.checkSubscriptionStandby
+	s.loadOutageHistory()
 	s.priority.measurePings = probe.MeasureLatencies
 	return s
 }

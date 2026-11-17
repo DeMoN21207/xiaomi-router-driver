@@ -55,6 +55,8 @@ export function routingOverview(config, statusMap = new Map(), failoverMap = new
         targets: [...new Set(targets)],
         canQuickSwitch: Boolean(policyId) || !shared.ruleIds?.includes(scope.rule?.id),
         targetStatuses: status?.targets || [],
+        currentOutage: status?.currentOutage || null,
+        lastOutage: status?.lastOutage || null,
         failover: Boolean(failover),
         unavailable: failover?.mode === "direct",
         blocked: !failover && Boolean(status?.blocked),
@@ -63,6 +65,12 @@ export function routingOverview(config, statusMap = new Map(), failoverMap = new
     }
   }
   return rows.sort((left, right) => Number(right.shared) - Number(left.shared));
+}
+
+export function formatOutageDuration(ms, lang) {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const unit = ms < 1000 ? "millisecond" : "second";
+  return new Intl.NumberFormat(lang, { style: "unit", unit }).format(ms < 1000 ? ms : ms / 1000);
 }
 
 export function prioritySelectionMessage(result, t) {

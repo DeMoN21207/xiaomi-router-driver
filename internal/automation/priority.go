@@ -32,10 +32,12 @@ type priorityDecision struct {
 	Reason            string
 	Since             time.Time
 	Fingerprint       string
+	selectedAt        time.Time
 	outcome           subscription.RuleApplyResult
 }
 
 type priorityRuntime struct {
+	outages           map[string]*priorityOutageSeries
 	decisions         map[string]priorityDecision
 	overrides         map[string]priorityOverride
 	health            map[string]providerHealthState
@@ -75,6 +77,8 @@ type PriorityStatus struct {
 }
 
 type PriorityPolicyStatus struct {
+	CurrentOutage     *PriorityOutage        `json:"currentOutage,omitempty"`
+	LastOutage        *PriorityOutage        `json:"lastOutage,omitempty"`
 	PolicyID          string                 `json:"policyId"`
 	PolicyName        string                 `json:"policyName"`
 	ProviderID        string                 `json:"providerId"`
@@ -209,15 +213,18 @@ func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state conf
 	now := time.Now()
 	s.priorityMu.Lock()
 	s.priority.ensure()
-	s.prunePriorityRuntimeLocked(state, now)
+	prunedHistory := s.prunePriorityRuntimeLocked(state, now)
 	s.priorityMu.Unlock()
+	if prunedHistory {
+		s.saveOutageHistory()
+	}
 
 	s.updatePriorityServerPings(ctx, state, now)
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	next := make(map[string]priorityDecision)
-	ctx = context.WithValue(ctx, priorityProbeCycleKey{}, &priorityProbeCycle{active: make(map[string]*priorityCycleProbe)})
+	ctx = context.WithValue(ctx, priorityProbeCycleKey{}, &priorityProbeCycle{active: make(map[string]*priorityCycleProbe), snapshotAt: now.UTC()})
 	for _, policy := range state.PriorityPolicies {
 		if policy.ID == selection.policyID {
 			decision, err := s.evaluateManualSelection(ctx, state, snapshot, policy, now, selection.location)
@@ -263,14 +270,17 @@ func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state conf
 	}
 	applyCtx, cancel := context.WithTimeout(ctx, priorityApplyTimeout)
 	applyCtx, report := subscription.WithApplyReport(applyCtx)
+	s.noteOutageSelections(next, selection)
 	s.priority.reconcileRequired = true
 	err := s.applyState(applyCtx, routingState)
+	appliedAt := time.Now()
 	cancel()
 	if err != nil {
 		s.record("error", "automation.priority_apply_failed", fmt.Sprintf("apply priority policies failed: %v", err))
 		return false, err
 	}
 	s.noteDegradedTargets(appliedState, report)
+	s.observeBlockedRoutes(state, report, appliedAt)
 	if manual {
 		if err := s.confirmManualSelection(ctx, next[selection.policyID], report); err != nil {
 			// The apply completed, but the selected rule may be blocked or retained.
@@ -292,8 +302,10 @@ func (s *Supervisor) maybePriorityPoliciesLocked(ctx context.Context, state conf
 			s.priority.overrides[selection.policyID] = priorityOverride{Location: next[selection.policyID].ActiveLocation, Since: now}
 		}
 	}
-	s.priority.lastApply = time.Now()
+	s.priority.lastApply = appliedAt
+	verify := s.appliedOutageTargetsLocked(state, next, s.priority.lastApply)
 	s.priorityMu.Unlock()
+	s.verifyAppliedOutages(ctx, state, verify)
 	s.savePriorityTargets(state, appliedState, report)
 	s.record("info", "automation.priority_applied", formatPriorityApplyMessage(next))
 	return true, nil
@@ -488,10 +500,18 @@ func priorityRuleID(policyID string) string {
 	return "__priority_policy_" + strings.TrimSpace(policyID)
 }
 
-func (s *Supervisor) prunePriorityRuntimeLocked(state config.State, now time.Time) {
+func (s *Supervisor) prunePriorityRuntimeLocked(state config.State, now time.Time) bool {
 	policies := make(map[string]config.PriorityPolicy, len(state.PriorityPolicies))
 	for _, policy := range state.PriorityPolicies {
 		policies[policy.ID] = policy
+	}
+	prunedHistory := false
+	for id, series := range s.priority.outages {
+		policy, exists := policies[id]
+		if !exists || !policy.Enabled || series.Scope != outageScope(priorityPolicyFingerprint(policy, state)) {
+			prunedHistory = prunedHistory || series.Last != nil
+			delete(s.priority.outages, id)
+		}
 	}
 	for policyID, override := range s.priority.overrides {
 		policy, exists := policies[policyID]
@@ -503,6 +523,7 @@ func (s *Supervisor) prunePriorityRuntimeLocked(state config.State, now time.Tim
 			delete(s.priority.overrides, policyID)
 		}
 	}
+	return prunedHistory
 }
 
 // The caller holds priorityEvalMu, not priorityMu: probes run without blocking
@@ -584,64 +605,73 @@ func (s *Supervisor) evaluatePriorityPolicy(ctx context.Context, state config.St
 	if failureThreshold <= 0 {
 		failureThreshold = 2 * time.Minute
 	}
-	// Probe the current tunnel and preferred server together so a dead primary
-	// cannot delay observing a failure of the active backup.
-	probes := make(map[string]providerProbeResult)
-	healths := make(map[string]providerHealthState)
-	type targetResult struct {
-		location string
-		probe    providerProbeResult
+	rapid := rapidPriorityChecks(state)
+	search := prioritySearch{
+		supervisor: s, provider: provider,
+		check: func(location string) providerProbeResult {
+			return s.priorityTargetProbe(ctx, state, snapshot, provider, location, previous)
+		},
+		record: func(location string, probe providerProbeResult) providerHealthState {
+			return s.updatePriorityTargetHealth(policy, provider, location, probe, now)
+		},
+		flights: make(map[string]*standbyFlight), samples: make(map[string]priorityProbeSample),
 	}
-	initial := []string{preferred}
-	if previous.ActiveLocation != "" && previous.ActiveLocation != preferred {
-		initial = append(initial, previous.ActiveLocation)
-	}
-	if rapidPriorityChecks(state) {
-		for _, candidate := range candidates {
-			if len(initial) >= 3 {
-				break
-			}
-			seen := false
-			for _, location := range initial {
-				if location == candidate {
-					seen = true
-					break
-				}
-			}
-			if !seen {
-				initial = append(initial, candidate)
-			}
+	// Start the usual restoration check alongside the active tunnel. Rapid
+	// mode also keeps the first two reserves warm within the shared budget.
+	warm := 0
+	for _, location := range candidates {
+		if location == previous.ActiveLocation {
+			continue
+		}
+		if !rapid && location != preferred {
+			break
+		}
+		search.start(ctx, location)
+		warm++
+		if warm == standbyProbeLimit || !rapid {
+			break
 		}
 	}
-	results := make(chan targetResult, len(initial))
-	for _, location := range initial {
-		go func(location string) {
-			results <- targetResult{location, s.priorityTargetProbe(ctx, state, snapshot, provider, location, previous)}
-		}(location)
+	defer func() {
+		if ctx.Err() == nil {
+			for location := range search.flights {
+				search.collect(location)
+			}
+		}
+	}()
+	var active priorityProbeSample
+	activeProtected := false
+	if previous.ActiveLocation != "" {
+		active.probe = search.check(previous.ActiveLocation)
+		if ctx.Err() != nil {
+			return priorityDecision{}, false
+		}
+		active.health = search.record(previous.ActiveLocation, active.probe)
+		activeProtected = !previous.outcome.Blocked && (active.probe.Healthy || active.health.UnhealthySince.IsZero() ||
+			now.Sub(active.health.UnhealthySince) < failureThreshold || active.health.ConsecutiveFailures < failoverFailureStreak())
+		if previous.Fingerprint == fingerprint {
+			s.observePriorityActive(ctx, policy, previous, active.probe, !active.probe.Healthy && !activeProtected)
+		}
 	}
-	for range initial {
-		result := <-results
-		probes[result.location] = result.probe
-		healths[result.location] = s.updatePriorityTargetHealth(policy, provider, result.location, result.probe, now)
-	}
-	activeHealth := healths[previous.ActiveLocation]
-	activeProtected := !previous.outcome.Blocked && previous.ActiveLocation != "" && (probes[previous.ActiveLocation].Healthy ||
-		activeHealth.UnhealthySince.IsZero() || now.Sub(activeHealth.UnhealthySince) < failureThreshold || activeHealth.ConsecutiveFailures < failoverFailureStreak())
+	lookAhead := rapid && !activeProtected
 	selected := ""
 	selectedProbe := providerProbeResult{}
 	reason := ""
-	for _, location := range candidates {
+	for index, location := range candidates {
 		// Keep a working backup instead of hopping through intermediate targets.
 		// Only the preferred target earns automatic restoration after its grace period.
 		if !chooseByPing && activeProtected && location != preferred && location != previous.ActiveLocation {
 			continue
 		}
-		probe, checked := probes[location]
-		health := healths[location]
-		if !checked {
-			probe = s.priorityTargetProbe(ctx, state, snapshot, provider, location, previous)
-			health = s.updatePriorityTargetHealth(policy, provider, location, probe, now)
+		sample := active
+		if location != previous.ActiveLocation {
+			var ok bool
+			sample, ok = search.await(ctx, candidates[index:], previous.ActiveLocation, lookAhead)
+			if !ok {
+				return priorityDecision{}, false
+			}
 		}
+		probe, health := sample.probe, sample.health
 		if !probe.Healthy {
 			if location == previous.ActiveLocation && activeProtected {
 				selected = location
@@ -655,10 +685,10 @@ func (s *Supervisor) evaluatePriorityPolicy(ctx context.Context, state config.St
 			stableFor := max(time.Minute, time.Duration(state.Automation.FailoverRestoreSeconds)*time.Second)
 			currentPing := pings[standbyProbeKey(provider, previous.ActiveLocation)]
 			candidatePing := pings[standbyProbeKey(provider, location)]
-			if !probes[previous.ActiveLocation].Healthy || !significantPingImprovement(currentPing, candidatePing, now) ||
+			if !active.probe.Healthy || !significantPingImprovement(currentPing, candidatePing, now) ||
 				health.HealthySince.IsZero() || now.Sub(health.HealthySince) < stableFor || now.Sub(previous.Since) < stableFor || health.ConsecutiveSuccesses < failoverRestoreStreak() {
 				selected = previous.ActiveLocation
-				selectedProbe = probes[previous.ActiveLocation]
+				selectedProbe = active.probe
 				reason = "keeping active VPN until a lower server ping is a stable improvement"
 				break
 			}
@@ -706,12 +736,14 @@ func (s *Supervisor) evaluatePriorityPolicy(ctx context.Context, state config.St
 		PreferredLocation: preferred,
 		Mode:              "provider",
 		Reason:            priorityReasonWithProbe(reason, selectedProbe),
+		selectedAt:        time.Now().UTC(),
 		Since:             decisionSince(previous, now, selected, "provider", fingerprint),
 		Fingerprint:       fingerprint,
 	}, true
 }
 
 func (s *Supervisor) priorityTargetProbe(ctx context.Context, state config.State, snapshot status.Snapshot, provider config.Provider, location string, previous priorityDecision) providerProbeResult {
+	evaluationCtx := ctx
 	if rapidPriorityChecks(state) {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 1500*time.Millisecond)
@@ -728,24 +760,31 @@ func (s *Supervisor) priorityTargetProbe(ctx context.Context, state config.State
 				continue
 			}
 			foundRuntime = true
+			if item.LocationIssue != "" {
+				return providerProbeResult{Location: location, Detail: item.LocationIssue, runtimeUnavailable: true}
+			}
 			if item.Status != "running" {
-				return providerProbeResult{Healthy: false, Detail: firstNonEmpty(item.StatusDetail, fmt.Sprintf("subscription location %s is not running", location)), Location: location}
+				return providerProbeResult{Detail: firstNonEmpty(item.StatusDetail, fmt.Sprintf("subscription location %s is not running", location)), Location: location, runtimeUnavailable: true}
 			}
 			if strings.TrimSpace(item.InterfaceName) != "" {
 				probe := s.priorityTunnelProbe(ctx, item.InterfaceName, item.FWMark)
 				probe.Location = location
-				s.cacheProviderProbe(standbyProbeKey(provider, location), probe)
+				if evaluationCtx.Err() == nil {
+					s.cacheProviderProbe(standbyProbeKey(provider, location), probe)
+				}
 				return probe
 			}
 			break
 		}
 		if !foundRuntime {
-			return providerProbeResult{Healthy: false, Detail: "subscription runtime is missing for active priority target", Location: location}
+			return providerProbeResult{Detail: "subscription runtime is missing for active priority target", Location: location, runtimeUnavailable: true}
 		}
 	}
 
 	if previous.ActiveLocation != location && s.probeStandby != nil {
-		return s.probeStandby(ctx, provider, location)
+		result := s.probeStandby(ctx, provider, location)
+		result.Location = location
+		return result
 	}
 	probe := s.probeProvider(ctx, state, provider, location)
 	if probe.Location == "" {
@@ -1083,6 +1122,10 @@ func (s *Supervisor) PriorityStatus() PriorityStatus {
 			Reason:            decision.Reason,
 			Since:             timeString(decision.Since),
 			Targets:           make([]PriorityTargetStatus, 0, len(policy.Targets)),
+		}
+		if series := s.priority.outages[policy.ID]; policy.Enabled && series != nil && series.Scope == outageScope(priorityPolicyFingerprint(policy, state)) {
+			item.CurrentOutage = series.Current.snapshot(time.Now())
+			item.LastOutage = series.Last.snapshot(time.Now())
 		}
 		for _, target := range policy.Targets {
 			location := strings.TrimSpace(target.Location)

@@ -19,6 +19,8 @@ import (
 	"xiomi-router-driver/internal/subscription"
 )
 
+const standbyProbeCacheAge = 5 * time.Second
+
 type cachedProviderProbe struct {
 	result  providerProbeResult
 	checked time.Time
@@ -36,6 +38,7 @@ func (s *Supervisor) cachedProviderProbe(key string, maxAge time.Duration) (prov
 }
 
 func (s *Supervisor) cacheProviderProbe(key string, result providerProbeResult) {
+	result.tunnelStarted, result.tunnelFinished = time.Time{}, time.Time{}
 	s.probeCacheMu.Lock()
 	defer s.probeCacheMu.Unlock()
 	if s.probeCache == nil {
@@ -47,17 +50,6 @@ func (s *Supervisor) cacheProviderProbe(key string, result providerProbeResult) 
 		}
 	}
 	s.probeCache[key] = cachedProviderProbe{result: result, checked: time.Now()}
-}
-
-func (s *Supervisor) probeSubscriptionStandby(ctx context.Context, provider config.Provider, location string) providerProbeResult {
-	key := standbyProbeKey(provider, location)
-	if result, ok := s.cachedProviderProbe(key, 5*time.Second); ok {
-		return result
-	}
-	result := s.checkSubscriptionStandby(ctx, provider, location)
-	result.Location = location
-	s.cacheProviderProbe(key, result)
-	return result
 }
 
 func (s *Supervisor) checkSubscriptionStandby(ctx context.Context, provider config.Provider, location string) providerProbeResult {
